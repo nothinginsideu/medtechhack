@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+@layer base {
+  body {
+    @apply bg-[#F9FAFB] text-[#111827] antialiased;
+    font-family: 'Inter', sans-serif;
+  }
+}
