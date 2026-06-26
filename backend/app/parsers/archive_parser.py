@@ -58,7 +58,7 @@ class ArchiveProcessor:
             return FileFormat.xlsx
         return None
 
-    async def process_zip(self, zip_content: bytes, default_usd_rate: float = 500.0) -> list:
+    async def process_zip(self, zip_content: bytes) -> list:
         """
         Распаковывает ZIP, определяет партнера, дату, создает PriceDocument и возвращает их.
         """
@@ -105,8 +105,7 @@ class ArchiveProcessor:
                 
                 documents_to_process.append({
                     "doc_id": doc.id,
-                    "file_path": temp_path,
-                    "usd_rate": default_usd_rate
+                    "file_path": temp_path
                 })
                 
         return documents_to_process

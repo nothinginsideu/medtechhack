@@ -120,7 +120,7 @@ export default function ClientHome() {
               <div className="text-center py-12 bg-white border border-[#E5E7EB] rounded-md">
                 <Search className="mx-auto h-8 w-8 text-[#D1D5DB] mb-3" />
                 <p className="text-[#374151] font-medium">Ничего не найдено</p>
-                <p className="text-[#6B7280] text-sm mt-1">Попробуйте изменить запрос</p>
+                <p className="text-[#6B7280] text-sm mt-1">Попробуйте изменить параметры запроса</p>
               </div>
             )}
 
@@ -160,7 +160,7 @@ export default function ClientHome() {
                             </div>
                             {hasForeignCurrency && (
                               <div className="text-xs text-[#9CA3AF]">
-                                Оригинал: {Number(priceItem.price_original).toLocaleString('ru-RU')} {priceItem.currency_original}
+                                (~ {Number(priceItem.price_original).toLocaleString('ru-RU')} {priceItem.currency_original})
                               </div>
                             )}
                           </div>
@@ -231,7 +231,7 @@ export default function ClientHome() {
                         <td className="px-4 py-2 text-[#111827]">{p.price_resident} ₸</td>
                         <td className="px-4 py-2 text-[#6B7280]">{p.price_nonresident} ₸</td>
                         <td className="px-4 py-2 text-[#9CA3AF] text-xs">
-                          {p.currency_original !== 'KZT' ? `${p.price_original} ${p.currency_original}` : '-'}
+                          {p.currency_original !== 'KZT' ? `(~ ${p.price_original} ${p.currency_original})` : '-'}
                         </td>
                       </tr>
                     ))}

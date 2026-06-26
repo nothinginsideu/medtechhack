@@ -13,7 +13,7 @@ export default function AdminDashboard() {
   
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState('');
-  const [usdRate, setUsdRate] = useState(500.0);
+  const [loading, setLoading] = useState(false);
   
   const fileInputRef = useRef(null);
 
@@ -22,12 +22,15 @@ export default function AdminDashboard() {
   }, []);
 
   const fetchAnomalies = async () => {
+    setLoading(true);
     try {
       const response = await axios.get('http://localhost:8000/api/v1/admin/unmatched');
       setAnomalies(response.data);
       setStats(prev => ({ ...prev, inQueue: response.data.length }));
     } catch (error) {
       console.error("Ошибка при загрузке аномалий:", error);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -45,7 +48,6 @@ export default function AdminDashboard() {
 
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('usd_rate', usdRate);
 
     try {
       const response = await axios.post('http://localhost:8000/api/v1/admin/upload-prices', formData, {
@@ -64,13 +66,23 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleApprove = async (id, serviceId, newPrice) => {
+  const handleRowChange = (id, field, value) => {
+    setAnomalies(prev => prev.map(a => a.id === id ? { ...a, [field]: value } : a));
+  };
+
+  const handleApprove = async (id, serviceId, newPrice, newPriceNonresident, rawName) => {
+    setLoading(true);
     try {
-      await axios.post(`http://localhost:8000/api/v1/admin/match/${id}?service_id=${serviceId}&price=${newPrice}`);
-      setAnomalies(prev => prev.filter(a => a.id !== id));
-      setStats(prev => ({ ...prev, inQueue: prev.inQueue - 1 }));
+      // POST with the updated rawName and both prices
+      const response = await axios.post(`http://localhost:8000/api/v1/admin/match/${id}?service_id=${serviceId}&price=${newPrice}&price_nonresident=${newPriceNonresident}&raw_name=${encodeURIComponent(rawName)}`);
+      if (response.status === 200) {
+        setAnomalies(prev => prev.filter(a => a.id !== id));
+        setStats(prev => ({ ...prev, inQueue: prev.inQueue - 1 }));
+      }
     } catch (error) {
       console.error("Ошибка при подтверждении:", error);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -89,13 +101,7 @@ export default function AdminDashboard() {
         
         <div className="flex items-center gap-4 mb-6">
           <div className="flex items-center gap-2">
-            <label className="text-sm font-medium text-[#374151]">Курс USD (на случай отсутствия в файле):</label>
-            <input 
-              type="number" 
-              value={usdRate}
-              onChange={e => setUsdRate(e.target.value)}
-              className="border border-[#D1D5DB] rounded-md px-3 py-1.5 text-sm w-24 focus:outline-none focus:ring-1 focus:ring-[#2563EB]"
-            />
+            <label className="text-sm font-medium text-[#374151]">Курс валют будет рассчитан автоматически (по году прайса)</label>
           </div>
         </div>
 
@@ -170,8 +176,8 @@ export default function AdminDashboard() {
         {anomalies.length === 0 ? (
           <div className="text-center py-12 bg-white border border-[#E5E7EB] rounded-md">
             <CheckCircle2 className="mx-auto h-12 w-12 text-[#D1D5DB] mb-3" />
-            <h3 className="text-sm font-medium text-[#374151]">Очередь пуста</h3>
-            <p className="text-sm text-[#6B7280] mt-1">Все новые позиции успешно обработаны ИИ.</p>
+            <h3 className="text-sm font-medium text-[#374151]">Очередь верификации пуста</h3>
+            <p className="text-sm text-[#6B7280] mt-1">Загрузите ZIP-архив клиник для начала обработки.</p>
           </div>
         ) : (
           <div className="space-y-4">
@@ -191,19 +197,40 @@ export default function AdminDashboard() {
                   {/* Source Block */}
                   <div className="flex-1 p-5 border-b lg:border-b-0 lg:border-r border-[#E5E7EB]">
                     <div className="text-[11px] font-semibold text-[#6B7280] uppercase tracking-wider mb-2">Источник (Сырые данные)</div>
-                    <div className="font-medium text-[#111827] text-base mb-2">{item.raw_name}</div>
-                    <div className="flex items-center gap-4 text-sm">
+                    <input 
+                      type="text" 
+                      value={item.raw_name} 
+                      onChange={e => handleRowChange(item.id, 'raw_name', e.target.value)}
+                      className="font-medium text-[#111827] text-base mb-2 border border-[#D1D5DB] rounded px-2 py-1 w-full focus:ring-[#2563EB] focus:outline-none"
+                    />
+                    <div className="flex flex-col gap-2 text-sm mt-4">
                       {item.old_price && (
-                        <div className="text-[#6B7280]">Старая: <span className="line-through">{item.old_price} ₸</span></div>
+                        <div className="text-[#6B7280] mb-2">Старая цена (Рез): <span className="line-through">{item.old_price} ₸</span></div>
                       )}
-                      <div className="text-[#111827] font-semibold">
-                        <input 
-                          type="number" 
-                          defaultValue={item.new_price} 
-                          id={`price-edit-${item.id}`}
-                          className="border border-[#D1D5DB] rounded px-2 py-1 w-24 text-sm ml-2 focus:ring-[#2563EB] focus:outline-none"
-                        /> ₸
+                      <div className="flex items-center gap-2">
+                        <span className="w-24 text-[#6B7280]">Резидент:</span>
+                        <div className="text-[#111827] font-semibold flex items-center">
+                          <input 
+                            type="number" 
+                            value={item.new_price} 
+                            onChange={e => handleRowChange(item.id, 'new_price', e.target.value)}
+                            className="border border-[#D1D5DB] rounded px-2 py-1 w-24 text-sm mr-2 focus:ring-[#2563EB] focus:outline-none"
+                          /> ₸
+                        </div>
                       </div>
+                      
+                      <div className="flex items-center gap-2">
+                        <span className="w-24 text-[#6B7280]">Нерезидент:</span>
+                        <div className="text-[#111827] font-semibold flex items-center">
+                          <input 
+                            type="number" 
+                            value={item.new_price_nonresident} 
+                            onChange={e => handleRowChange(item.id, 'new_price_nonresident', e.target.value)}
+                            className="border border-[#D1D5DB] rounded px-2 py-1 w-24 text-sm mr-2 focus:ring-[#2563EB] focus:outline-none"
+                          /> ₸
+                        </div>
+                      </div>
+
                       {item.diff && (
                         <div className={`font-bold text-xs ${item.status === 'anomaly' ? 'text-[#DC2626]' : 'text-[#6B7280]'}`}>
                           ({item.diff})
@@ -227,9 +254,9 @@ export default function AdminDashboard() {
                     <div className="flex gap-2 mt-auto">
                       <button 
                         onClick={() => {
-                          const val = document.getElementById(`price-edit-${item.id}`).value;
-                          handleApprove(item.id, item.suggested_service_id, parseFloat(val));
+                          handleApprove(item.id, item.suggested_service_id, parseFloat(item.new_price), parseFloat(item.new_price_nonresident), item.raw_name);
                         }}
+                        disabled={loading}
                         className="flex-1 bg-[#111827] hover:bg-[#374151] text-white px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
                       >
                         Подтвердить

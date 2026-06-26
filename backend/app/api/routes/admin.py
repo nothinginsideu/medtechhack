@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List
@@ -19,7 +19,6 @@ async def process_documents_task(documents_to_process: list, db_session: AsyncSe
     for doc_info in documents_to_process:
         doc_id = doc_info["doc_id"]
         file_path = doc_info["file_path"]
-        usd_rate = doc_info["usd_rate"]
         
         stmt = select(PriceDocument).where(PriceDocument.id == doc_id)
         result = await db_session.execute(stmt)
@@ -31,17 +30,27 @@ async def process_documents_task(documents_to_process: list, db_session: AsyncSe
         await db_session.commit()
         
         try:
+            from datetime import date
             # 1. Parsing
             parser = get_parser(file_path, {})
             parsed_items = parser.parse()
+            
+            # Historical USD rate logic
+            historic_rates = {2024: 450, 2025: 480, 2026: 485}
+            year = doc.effective_date.year if doc.effective_date else date.today().year
+            usd_rate = historic_rates.get(year, 480)
+            
+            if doc.effective_date and doc.effective_date > date.today():
+                doc.parse_log = (doc.parse_log or "") + f"Предупреждение: дата прайса в будущем ({doc.effective_date}).\n"
             
             # 2. Matching and Validation
             matcher = Matcher(db_session)
             await matcher.load_services()
             
             for item_data in parsed_items:
-                raw_name = item_data.get("name", "")
+                raw_name = str(item_data.get("name", "")).strip()
                 if not raw_name:
+                    doc.parse_log = (doc.parse_log or "") + "Пропущена строка: пустое название услуги.\n"
                     continue
                     
                 price_resident = item_data.get("price", 0)
@@ -51,9 +60,16 @@ async def process_documents_task(documents_to_process: list, db_session: AsyncSe
                 needs_review = False
                 verification_note = None
                 
+                try:
+                    price_resident = float(price_resident)
+                    price_nonresident = float(price_nonresident)
+                except (ValueError, TypeError):
+                    price_resident = 0.0
+                    price_nonresident = 0.0
+                    
                 if price_resident <= 0:
                     needs_review = True
-                    verification_note = "Цена должна быть больше 0"
+                    verification_note = "Цена должна быть числом больше 0"
                 elif price_nonresident < price_resident:
                     needs_review = True
                     verification_note = "Цена для нерезидента меньше цены для резидента"
@@ -117,7 +133,6 @@ async def process_documents_task(documents_to_process: list, db_session: AsyncSe
 async def upload_prices_archive(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    usd_rate: float = Form(500.0),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -129,7 +144,7 @@ async def upload_prices_archive(
     content = await file.read()
     
     processor = ArchiveProcessor(db)
-    documents_to_process = await processor.process_zip(content, usd_rate)
+    documents_to_process = await processor.process_zip(content)
     
     if not documents_to_process:
         return {"status": "warning", "message": "Не найдено поддерживаемых файлов или партнеров"}
@@ -167,6 +182,7 @@ async def get_unmatched_items(db: AsyncSession = Depends(get_db)):
         
         old_price = float(prev_item.price_resident_kzt) if prev_item else None
         new_price = float(item.price_resident_kzt)
+        new_price_nonresident = float(item.price_nonresident_kzt)
         diff_str = ""
         if old_price:
             diff = new_price - old_price
@@ -181,6 +197,7 @@ async def get_unmatched_items(db: AsyncSession = Depends(get_db)):
             "confidence": item.match_score,
             "old_price": old_price,
             "new_price": new_price,
+            "new_price_nonresident": new_price_nonresident,
             "diff": diff_str,
             "status": "anomaly" if item.verification_note else "unmatched",
             "note": item.verification_note
@@ -188,7 +205,7 @@ async def get_unmatched_items(db: AsyncSession = Depends(get_db)):
     return response
 
 @router.post("/match/{item_id}")
-async def match_item(item_id: int, service_id: int, price: float, db: AsyncSession = Depends(get_db)):
+async def match_item(item_id: int, service_id: int, price: float, price_nonresident: float, raw_name: str = Query(...), db: AsyncSession = Depends(get_db)):
     """
     Ручное подтверждение (или корректировка) оператором.
     """
@@ -201,6 +218,8 @@ async def match_item(item_id: int, service_id: int, price: float, db: AsyncSessi
         
     item.service_id = service_id
     item.price_resident_kzt = price
+    item.price_nonresident_kzt = price_nonresident
+    item.service_name_raw = raw_name
     item.is_verified = True
     item.verification_note = "Проверено и скорректировано оператором"
     
