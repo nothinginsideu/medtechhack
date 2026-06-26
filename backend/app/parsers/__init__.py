@@ -6,7 +6,7 @@ import os
 def get_parser(file_path: str, config: dict):
     ext = os.path.splitext(file_path)[1].lower()
     
-    if ext == ".xlsx":
+    if ext in [".xlsx", ".xls"]:
         return ExcelParser(file_path, config)
     elif ext == ".docx":
         return WordParser(file_path, config)

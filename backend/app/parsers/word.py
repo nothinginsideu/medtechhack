@@ -8,17 +8,17 @@ class WordParser(BaseParser):
         doc = docx.Document(self.file_path)
         items = []
         
-        # Чаще всего прайсы в Word лежат в таблицах
+        ns = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'
         for table in doc.tables:
-            for i, row in enumerate(table.rows):
+            for i, tr in enumerate(table._tbl.tr_lst):
                 # Пропускаем шапку (грубо)
                 if i == 0 and self.config.get("has_header", True):
                     continue
                 
-                cells = row.cells
+                cells = tr.tc_lst
                 if len(cells) >= 2:
-                    name_cell = cells[0].text.strip()
-                    price_cell = cells[-1].text.strip() # Цена обычно в последней колонке
+                    name_cell = " ".join("".join(n.text for n in cell.iter(ns) if getattr(n, 'text', None)).strip() for cell in cells[:-1]).strip()
+                    price_cell = "".join(n.text for n in cells[-1].iter(ns) if getattr(n, 'text', None)).strip()
                     
                     if name_cell:
                         try:

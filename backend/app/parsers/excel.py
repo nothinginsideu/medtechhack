@@ -5,43 +5,68 @@ import re
 
 class ExcelParser(BaseParser):
     def parse(self) -> typing.List[ParsedItem]:
-        wb = openpyxl.load_workbook(self.file_path, data_only=True)
-        sheet = wb.active
+        import os
+        ext = os.path.splitext(self.file_path)[1].lower()
+        
+        rows_data = []
+        if ext == ".xls":
+            import xlrd
+            wb = xlrd.open_workbook(self.file_path)
+            sheet = wb.sheet_by_index(0)
+            rows_data = [sheet.row_values(i) for i in range(sheet.nrows)]
+        else:
+            import openpyxl
+            wb = openpyxl.load_workbook(self.file_path, data_only=True)
+            sheet = wb.active
+            rows_data = list(sheet.iter_rows(values_only=True))
         
         items = []
-        name_col = self.config.get("name_col", "A")
-        price_col = self.config.get("price_col", "B")
-        skip_rows = self.config.get("skip_rows", 1)
         
-        for i, row in enumerate(sheet.iter_rows()):
-            if i < skip_rows:
+        # Auto-detect columns
+        name_idx = -1
+        price_idx = -1
+        
+        # Поиск заголовков
+        for row_idx, row in enumerate(rows_data[:30]):
+            for col_idx, cell in enumerate(row):
+                if isinstance(cell, str):
+                    val = cell.lower()
+                    if "наименование" in val or "услуга" in val:
+                        name_idx = col_idx
+                    if ("цена" in val or "стоимость" in val or "тенге" in val or "граждан" in val) and price_idx == -1:
+                        price_idx = col_idx
+            
+            if name_idx != -1 and price_idx != -1:
+                break
+                
+        # Фоллбэк: если заголовки не найдены, ищем колонку с длинным текстом и колонку с числами
+        if name_idx == -1 or price_idx == -1:
+            name_idx, price_idx = 1, 4 # Дефолт для Клиники 8
+            
+        for i, row in enumerate(rows_data):
+            if i < 3: # Пропускаем хидеры
                 continue
                 
-            # openpyxl col indices are 0-based in iter_rows, but config gives 'A', 'B'
-            # Convert 'A' to 0, 'B' to 1
-            name_idx = ord(name_col.upper()) - 65
-            price_idx = ord(price_col.upper()) - 65
-            
             if len(row) > max(name_idx, price_idx):
-                name_val = row[name_idx].value
-                price_val = row[price_idx].value
+                name_cell = row[name_idx]
+                price_cell = row[price_idx]
                 
-                name_cell = row[name_idx].value
-                price_cell = row[price_idx].value
-                
-                if name_cell and isinstance(name_cell, str) and name_cell.strip():
+                if name_cell and isinstance(name_cell, str) and len(name_cell.strip()) > 5:
                     try:
-                        price_val = float(str(price_cell).replace(" ", "").replace(",", "."))
+                        # Очистка цены
+                        price_str = str(price_cell).replace(" ", "").replace(",", ".").replace("тг", "").replace("kzt", "").replace("₸", "")
+                        price_val = float(price_str)
+                        
+                        if price_val < 100: continue
                         
                         item = ParsedItem(
-                            service_name_raw=name_cell,
+                            service_name_raw=name_cell.strip(),
                             price_resident_kzt=price_val,
                             service_code_source=str(row[0]) if row[0] else None
                         )
-                        # Прогоняем валидацию
                         item.validate_prices()
                         items.append(item)
                     except ValueError:
                         continue
-                    
+                        
         return items

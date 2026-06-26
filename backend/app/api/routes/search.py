@@ -27,7 +27,8 @@ async def search_services(
         return []
 
     stmt = select(Service).where(Service.name_ru.ilike(f"%{norm_query}%")).options(
-        joinedload(Service.price_items).joinedload(PriceItem.document)
+        joinedload(Service.price_items).joinedload(PriceItem.document),
+        joinedload(Service.price_items).joinedload(PriceItem.partner)
     )
     
     result = await db.execute(stmt)

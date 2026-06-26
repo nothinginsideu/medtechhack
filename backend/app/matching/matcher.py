@@ -31,7 +31,7 @@ class Matcher:
                 return MatchResult(service_id=self.services_cache[i].id, score=100.0)
         return None
         
-    def fuzzy_match(self, text: str, threshold: float = 70.0) -> MatchResult | None:
+    def fuzzy_match(self, text: str, threshold: float = 65.0) -> MatchResult | None:
         norm_text = Normalizer.normalize_text(text)
         
         best_score = 0
@@ -39,7 +39,9 @@ class Matcher:
         
         import rapidfuzz
         for i, norm_svc in enumerate(self.normalized_services):
-            score = rapidfuzz.fuzz.token_sort_ratio(norm_text, norm_svc)
+            # token_set_ratio игнорирует лишние слова (например "у взрослых"), 
+            # что кардинально повышает точность авто-сопоставления
+            score = rapidfuzz.fuzz.token_set_ratio(norm_text, norm_svc)
             if score > best_score:
                 best_score = score
                 best_index = i
