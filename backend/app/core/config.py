@@ -10,10 +10,17 @@ class Settings(BaseSettings):
     DB_PORT: str = "5432"
     DB_NAME: str = "medpartners"
     
+    DATABASE_URL: str = ""
     GEMINI_API_KEY: str = ""
 
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:
+        if self.DATABASE_URL:
+            # Railway provides postgresql:// but SQLAlchemy asyncpg needs postgresql+asyncpg://
+            url = self.DATABASE_URL
+            if url.startswith("postgresql://"):
+                url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            return url
         return f"postgresql+asyncpg://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

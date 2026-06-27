@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import axios from 'axios';
+import { API_BASE_URL } from '../config';
 
 // Debounce hook helper
 function useDebounce(value, delay) {
@@ -33,7 +34,7 @@ export function useServiceFilters(initialResults = [], selectedCity = 'Аста�
   useEffect(() => {
     const fetchCategories = async () => {
       try {
-        const response = await axios.get('http://localhost:8000/api/v1/categories');
+        const response = await axios.get(`${API_BASE_URL}/api/v1/categories`);
         setCategories(['Все', ...response.data]);
       } catch (error) {
         console.error("Error fetching categories:", error);
@@ -55,7 +56,7 @@ export function useServiceFilters(initialResults = [], selectedCity = 'Аста�
       setLoading(true);
       setSearched(true);
       try {
-        const response = await axios.get(`http://localhost:8000/api/v1/search?q=${encodeURIComponent(trimmedQuery)}`);
+        const response = await axios.get(`${API_BASE_URL}/api/v1/search?q=${encodeURIComponent(trimmedQuery)}`);
         setResults(response.data);
       } catch (error) {
         console.error("Error fetching services:", error);

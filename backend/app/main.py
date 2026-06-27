@@ -21,6 +21,24 @@ app.include_router(partners.router, prefix=f"{settings.API_V1_STR}/partners", ta
 app.include_router(services.router, prefix=f"{settings.API_V1_STR}/services", tags=["Services"])
 app.include_router(admin.router, prefix=f"{settings.API_V1_STR}/admin", tags=["Admin"])
 
+from app.db.database import engine
+from app.models.base import Base
+from app.models.partner import Partner
+from app.models.service import Service
+from app.models.price_document import PriceDocument
+from app.models.price_item import PriceItem
+from app.seed import seed_data
+
+@app.on_event("startup")
+async def startup_event():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        await seed_data()
+        print("Database initialized and seeded successfully.")
+    except Exception as e:
+        print(f"Error seeding database: {e}")
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to MedPartners API"}

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { CheckCircle2, AlertTriangle, FileText, Activity, UploadCloud, Loader2, RefreshCw, Download } from 'lucide-react';
+import { API_BASE_URL } from '../config';
 
 export default function AdminDashboard() {
   const [anomalies, setAnomalies] = useState([]);
@@ -45,7 +46,7 @@ export default function AdminDashboard() {
 
   const fetchStats = async () => {
     try {
-      const response = await axios.get('http://localhost:8000/api/v1/admin/stats');
+      const response = await axios.get(`${API_BASE_URL}/api/v1/admin/stats`);
       const newStats = response.data;
       setStats(newStats);
       setLastUpdated(new Date());
@@ -69,7 +70,7 @@ export default function AdminDashboard() {
   const fetchAnomalies = async (tab = activeTab) => {
     setLoading(true);
     try {
-      const response = await axios.get(`http://localhost:8000/api/v1/admin/unmatched?queue=${tab}`);
+      const response = await axios.get(`${API_BASE_URL}/api/v1/admin/unmatched?queue=${tab}`);
       setAnomalies(response.data.items || []);
       setQueueCounts({
         fast_track: response.data.fast_track_count || 0,
@@ -98,7 +99,7 @@ export default function AdminDashboard() {
     formData.append('file', file);
 
     try {
-      const response = await axios.post('http://localhost:8000/api/v1/admin/upload-prices', formData, {
+      const response = await axios.post(`${API_BASE_URL}/api/v1/admin/upload-prices`, formData, {
         headers: {
           'Content-Type': 'multipart/form-data'
         }
@@ -139,7 +140,7 @@ export default function AdminDashboard() {
         params.append('price_nonresident', newPriceNonresident);
       }
 
-      const response = await axios.post(`http://localhost:8000/api/v1/admin/match/${id}?${params.toString()}`);
+      const response = await axios.post(`${API_BASE_URL}/api/v1/admin/match/${id}?${params.toString()}`);
       if (response.status === 200) {
         setAnomalies(prev => prev.filter(a => a.id !== id));
         setQueueCounts(prev => ({ ...prev, [activeTab]: Math.max(0, prev[activeTab] - 1) }));
@@ -155,7 +156,7 @@ export default function AdminDashboard() {
   const handleReject = async (id) => {
     setLoading(true);
     try {
-      const response = await axios.delete(`http://localhost:8000/api/v1/admin/reject/${id}`);
+      const response = await axios.delete(`${API_BASE_URL}/api/v1/admin/reject/${id}`);
       if (response.status === 200) {
         setAnomalies(prev => prev.filter(a => a.id !== id));
         setQueueCounts(prev => ({ ...prev, [activeTab]: Math.max(0, prev[activeTab] - 1) }));
@@ -243,7 +244,7 @@ export default function AdminDashboard() {
           <div className="flex items-center gap-4">
             <button
               onClick={() => {
-                window.open('http://localhost:8000/api/v1/admin/export', '_blank');
+                window.open(`${API_BASE_URL}/api/v1/admin/export`, '_blank');
               }}
               className="flex items-center gap-1.5 text-xs font-medium text-[#111827] bg-white border border-[#D1D5DB] px-3 py-1.5 hover:bg-[#F9FAFB] cursor-pointer"
             >

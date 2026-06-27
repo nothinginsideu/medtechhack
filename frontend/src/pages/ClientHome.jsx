@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { Search, Loader2, TrendingUp, X, MapPin, Building2, Phone } from 'lucide-react';
 import { useServiceFilters } from '../hooks/useServiceFilters';
+import { API_BASE_URL } from '../config';
 
 export default function ClientHome({ selectedCity }) {
   const {
@@ -71,7 +72,7 @@ export default function ClientHome({ selectedCity }) {
       } else {
         params.append('service_id', serviceId);
       }
-      const response = await axios.get(`http://localhost:8000/api/v1/partners/${partnerId}/history?${params.toString()}`);
+      const response = await axios.get(`${API_BASE_URL}/api/v1/partners/${partnerId}/history?${params.toString()}`);
       setHistoryData(response.data);
     } catch (error) {
       console.error("Ошибка загрузки истории цен:", error);
@@ -99,7 +100,7 @@ export default function ClientHome({ selectedCity }) {
     isUserScrolledUp.current = false;
     
     try {
-      const response = await axios.post('http://localhost:8000/api/v1/search/assistant', {
+      const response = await axios.post(`${API_BASE_URL}/api/v1/search/assistant`, {
         message: currentInput
       });
       
@@ -240,7 +241,7 @@ export default function ClientHome({ selectedCity }) {
   const openPartnerModal = async (partnerId) => {
     setPartnerModalLoading(true);
     try {
-      const response = await axios.get(`http://localhost:8000/api/v1/partner/${partnerId}`);
+      const response = await axios.get(`${API_BASE_URL}/api/v1/partner/${partnerId}`);
       setSelectedPartner(response.data);
     } catch (error) {
       console.error("Ошибка загрузки профиля клиники:", error);
