@@ -3,7 +3,7 @@ import pytesseract
 from PIL import Image
 import typing
 import re
-from app.parsers.base import BaseParser, ParsedItem
+from app.parsers.base import BaseParser, ParsedItem, detect_currency
 import io
 
 class PDFParser(BaseParser):
@@ -36,18 +36,25 @@ class PDFParser(BaseParser):
         # Простой построчный парсер из извлеченного текста
         lines = extracted_text.split('\n')
         
+        file_currency = detect_currency("", self.file_path)
+        
         for line in lines:
             line = line.strip()
             if not line:
                 continue
                 
+            # Detect currency from line or filename
+            line_currency = detect_currency(line)
+            currency = line_currency if line_currency != "KZT" else file_currency
+                
             # Находим все числа, похожие на цены
             prices_str = re.findall(r'\b([1-9]\d{0,2}(?:\s?\d{3})*(?:[.,]\d{1,2})?)\b', line)
             valid_prices = []
+            threshold = 100 if currency == "KZT" else 1.0
             for p in prices_str:
                 try:
                     val = float(p.replace(" ", "").replace(",", "."))
-                    if val >= 100:
+                    if val >= threshold:
                         valid_prices.append(val)
                 except ValueError:
                     pass
@@ -79,9 +86,11 @@ class PDFParser(BaseParser):
                     
                 item = ParsedItem(
                     service_name_raw=name_raw,
-                    price_resident_kzt=price_val
+                    price_resident_kzt=price_val,
+                    currency_original=currency
                 )
                 item.validate_prices()
                 items.append(item)
 
         return items
+

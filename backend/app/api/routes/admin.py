@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from typing import List
+from typing import List, Optional
 import asyncio
 
 from app.db.database import get_db
@@ -24,129 +24,139 @@ async def process_documents_task(documents_to_process: list):
             file_path = doc_info["file_path"]
             
             stmt = select(PriceDocument).where(PriceDocument.id == doc_id)
-        result = await db_session.execute(stmt)
-        doc = result.scalars().first()
-        if not doc:
-            continue
-            
-        doc.parse_status = ParseStatus.processing
-        await db_session.commit()
-        
-        try:
-            from datetime import date
-            # 1. Parsing
-            parser = get_parser(file_path, {})
-            parsed_items = await asyncio.to_thread(parser.parse)
-            
-            # Historical USD rate logic
-            historic_rates = {2024: 450, 2025: 480, 2026: 485}
-            year = doc.effective_date.year if doc.effective_date else date.today().year
-            usd_rate = historic_rates.get(year, 480)
-            
-            if doc.effective_date and doc.effective_date > date.today():
-                doc.parse_log = (doc.parse_log or "") + f"Предупреждение: дата прайса в будущем ({doc.effective_date}).\n"
-            
-            # 2. Matching and Validation
-            matcher = Matcher(db_session)
-            await matcher.load_services()
-            
-            # Load all previous active prices for anomaly detection (bulk load to prevent N+1 queries)
-            prev_stmt = select(PriceItem).where(
-                PriceItem.partner_id == doc.partner_id,
-                PriceItem.is_active == True
-            ).order_by(PriceItem.effective_date.desc())
-            prev_result = await db_session.execute(prev_stmt)
-            prev_prices_dict = {}
-            for p in prev_result.scalars().all():
-                if p.service_name_raw not in prev_prices_dict:
-                    prev_prices_dict[p.service_name_raw] = p
-            
-            for item_data in parsed_items:
-                raw_name = str(getattr(item_data, "service_name_raw", "")).strip()
-                if not raw_name:
-                    doc.parse_log = (doc.parse_log or "") + "Пропущена строка: пустое название услуги.\n"
-                    continue
-                    
-                price_resident = getattr(item_data, "price_resident_kzt", 0) or 0
-                price_nonresident = getattr(item_data, "price_nonresident_kzt", price_resident * 1.5) or (price_resident * 1.5)
+            result = await db_session.execute(stmt)
+            doc = result.scalars().first()
+            if not doc:
+                continue
                 
-                # Validation rules
-                needs_review = False
-                verification_note = None
-                
-                try:
-                    price_resident = float(price_resident)
-                    price_nonresident = float(price_nonresident)
-                except (ValueError, TypeError):
-                    price_resident = 0.0
-                    price_nonresident = 0.0
-                    
-                # Protect against Numeric(10,2) overflow (max 99,999,999.99)
-                if price_resident > 99000000:
-                    price_resident = 99000000.0
-                if price_nonresident > 99000000:
-                    price_nonresident = 99000000.0
-                    
-                if price_resident <= 0:
-                    needs_review = True
-                    verification_note = "Цена должна быть числом больше 0"
-                elif price_nonresident < price_resident:
-                    needs_review = True
-                    verification_note = "Цена для нерезидента меньше цены для резидента"
-                
-                # Currency check
-                currency = getattr(item_data, "currency_original", "KZT")
-                price_original = price_resident
-                if currency in ["USD", "RUB"]:
-                    price_resident = price_resident * usd_rate
-                    price_nonresident = price_nonresident * usd_rate
-                
-                # Anomaly detection > 50%
-                prev_item = prev_prices_dict.get(raw_name)
-                
-                if prev_item and prev_item.price_resident_kzt:
-                    diff_ratio = abs(price_resident - float(prev_item.price_resident_kzt)) / float(prev_item.price_resident_kzt)
-                    if diff_ratio > 0.5:
-                        needs_review = True
-                        verification_note = f"Аномальный скачок цены (>{int(diff_ratio*100)}%)"
-
-                # AI Matching (Running CPU-bound fuzzy match in a thread pool to avoid blocking the event loop)
-                match_result = await asyncio.to_thread(matcher.match, raw_name)
-                matched_service_id = match_result.service_id if match_result else None
-                score = match_result.score if match_result else 0
-                
-                if score < 85:
-                    needs_review = True
-                
-                new_item = PriceItem(
-                    document_id=doc.id,
-                    partner_id=doc.partner_id,
-                    service_name_raw=raw_name,
-                    service_id=matched_service_id,
-                    price_resident_kzt=price_resident,
-                    price_nonresident_kzt=price_nonresident,
-                    price_original=price_original,
-                    currency_original=currency,
-                    is_verified=not needs_review,
-                    verification_note=verification_note,
-                    effective_date=doc.effective_date,
-                    match_score=score
-                )
-                db_session.add(new_item)
+            doc.parse_status = ParseStatus.processing
+            await db_session.commit()
             
             try:
-                doc.parse_status = ParseStatus.done
-                await db_session.commit()
+                from datetime import date
+                # 1. Parsing
+                parser = get_parser(file_path, {})
+                parsed_items = await asyncio.to_thread(parser.parse)
+                
+                # Historical USD and RUB rate logic
+                historic_usd_rates = {2024: 450, 2025: 480, 2026: 485}
+                historic_rub_rates = {2024: 5.0, 2025: 5.2, 2026: 5.3}
+                year = doc.effective_date.year if doc.effective_date else date.today().year
+                usd_rate = historic_usd_rates.get(year, 480)
+                rub_rate = historic_rub_rates.get(year, 5.2)
+                
+                if doc.effective_date and doc.effective_date > date.today():
+                    doc.parse_log = (doc.parse_log or "") + f"Предупреждение: дата прайса в будущем ({doc.effective_date}).\n"
+                
+                # 2. Matching and Validation
+                matcher = Matcher(db_session)
+                await matcher.load_services()
+                
+                # Load all previous active prices for anomaly detection (bulk load to prevent N+1 queries)
+                prev_stmt = select(PriceItem).where(
+                    PriceItem.partner_id == doc.partner_id,
+                    PriceItem.is_active == True
+                ).order_by(PriceItem.effective_date.desc())
+                prev_result = await db_session.execute(prev_stmt)
+                prev_prices_dict = {}
+                for p in prev_result.scalars().all():
+                    if p.service_name_raw not in prev_prices_dict:
+                        prev_prices_dict[p.service_name_raw] = p
+                
+                for item_data in parsed_items:
+                    raw_name = str(getattr(item_data, "service_name_raw", "")).strip()
+                    if not raw_name:
+                        doc.parse_log = (doc.parse_log or "") + "Пропущена строка: пустое название услуги.\n"
+                        continue
+                        
+                    price_resident = getattr(item_data, "price_resident_kzt", 0) or 0
+                    price_nonresident = getattr(item_data, "price_nonresident_kzt", price_resident * 1.5) or (price_resident * 1.5)
+                    
+                    # Validation rules
+                    needs_review = False
+                    verification_note = None
+                    
+                    try:
+                        price_resident = float(price_resident)
+                        price_nonresident = float(price_nonresident)
+                    except (ValueError, TypeError):
+                        price_resident = 0.0
+                        price_nonresident = 0.0
+                        
+                    # Protect against Numeric(10,2) overflow (max 99,999,999.99)
+                    if price_resident > 99000000:
+                        price_resident = 99000000.0
+                    if price_nonresident > 99000000:
+                        price_nonresident = 99000000.0
+                        
+                    if price_resident <= 0:
+                        needs_review = True
+                        verification_note = "Цена должна быть числом больше 0"
+                    elif price_nonresident < price_resident:
+                        needs_review = True
+                        verification_note = "Цена для нерезидента меньше цены для резидента"
+                    
+                    # Currency check
+                    currency = getattr(item_data, "currency_original", "KZT")
+                    price_original = price_resident
+                    if currency == "USD":
+                        price_resident = price_resident * usd_rate
+                        price_nonresident = price_nonresident * usd_rate
+                    elif currency == "RUB":
+                        price_resident = price_resident * rub_rate
+                        price_nonresident = price_nonresident * rub_rate
+                    
+                    # Anomaly detection > 50%
+                    prev_item = prev_prices_dict.get(raw_name)
+                    
+                    if prev_item and prev_item.price_resident_kzt:
+                        diff_ratio = abs(price_resident - float(prev_item.price_resident_kzt)) / float(prev_item.price_resident_kzt)
+                        if diff_ratio > 0.5:
+                            needs_review = True
+                            verification_note = f"Аномальный скачок цены (>{int(diff_ratio*100)}%)"
+    
+                    # AI Matching (Running CPU-bound fuzzy match in a thread pool to avoid blocking the event loop)
+                    match_result = await asyncio.to_thread(matcher.match, raw_name)
+                    matched_service_id = match_result.service_id if match_result else None
+                    score = match_result.score if match_result else 0
+                    
+                    if score < 85:
+                        needs_review = True
+                    
+                    # Deactivate old version if the new one is auto-verified immediately
+                    if not needs_review and prev_item:
+                        prev_item.is_active = False
+
+                    new_item = PriceItem(
+                        document_id=doc.id,
+                        partner_id=doc.partner_id,
+                        service_name_raw=raw_name,
+                        service_id=matched_service_id,
+                        price_resident_kzt=price_resident,
+                        price_nonresident_kzt=price_nonresident,
+                        price_original=price_original,
+                        currency_original=currency,
+                        is_verified=not needs_review,
+                        verification_note=verification_note,
+                        effective_date=doc.effective_date,
+                        is_active=True,
+                        match_score=score
+                    )
+                    db_session.add(new_item)
+                
+                try:
+                    doc.parse_status = ParseStatus.done
+                    await db_session.commit()
+                except Exception as e:
+                    await db_session.rollback()
+                    doc.parse_status = ParseStatus.error
+                    doc.parse_log = (doc.parse_log or "") + f"\nКритическая ошибка при сохранении в БД: {str(e)}"
+                    await db_session.commit()
+                
             except Exception as e:
-                await db_session.rollback()
                 doc.parse_status = ParseStatus.error
-                doc.parse_log = (doc.parse_log or "") + f"\nКритическая ошибка при сохранении в БД: {str(e)}"
+                doc.parse_log = str(e)
                 await db_session.commit()
-            
-        except Exception as e:
-            doc.parse_status = ParseStatus.error
-            doc.parse_log = str(e)
-            await db_session.commit()
 
 
 @router.post("/upload-prices")
@@ -177,13 +187,60 @@ async def upload_prices_archive(
         "message": f"Архив загружен. Файлов в обработке: {len(documents_to_process)}"
     }
 
+@router.get("/stats")
+async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
+    """
+    Получение агрегированной статистики для дашборда администратора.
+    """
+    from sqlalchemy import func
+    from app.models.partner import Partner
+    
+    # 1. Количество обработанных документов
+    docs_stmt = select(func.count()).select_from(PriceDocument).where(PriceDocument.parse_status == ParseStatus.done)
+    docs_result = await db.execute(docs_stmt)
+    processed_docs = docs_result.scalar() or 0
+    
+    # 2. Активные клиники
+    clinics_stmt = select(func.count()).select_from(Partner).where(Partner.is_active == True)
+    clinics_result = await db.execute(clinics_stmt)
+    active_clinics = clinics_result.scalar() or 0
+    
+    # 3. Позиции в очереди
+    unmatched_stmt = select(func.count()).select_from(PriceItem).where(PriceItem.is_verified == False)
+    unmatched_result = await db.execute(unmatched_stmt)
+    in_queue = unmatched_result.scalar() or 0
+    
+    # 4. Процент автоматической нормализации
+    total_active_stmt = select(func.count()).select_from(PriceItem).where(PriceItem.is_active == True)
+    total_active = (await db.execute(total_active_stmt)).scalar() or 0
+    
+    verified_active_stmt = select(func.count()).select_from(PriceItem).where(
+        PriceItem.is_active == True,
+        PriceItem.is_verified == True
+    )
+    verified_active = (await db.execute(verified_active_stmt)).scalar() or 0
+    
+    automation_score = int((verified_active / total_active) * 100) if total_active > 0 else 100
+    
+    return {
+        "processed": processed_docs,
+        "automationScore": automation_score,
+        "inQueue": in_queue,
+        "activeClinics": active_clinics
+    }
+
 @router.get("/unmatched")
 async def get_unmatched_items(db: AsyncSession = Depends(get_db)):
     """
     Очередь аномалий и непроверенных связей.
     """
+    from sqlalchemy.orm import joinedload
+    
     stmt = select(PriceItem).where(
         (PriceItem.is_verified == False)
+    ).options(
+        joinedload(PriceItem.partner),
+        joinedload(PriceItem.document)
     ).limit(50)
     result = await db.execute(stmt)
     items = result.scalars().all()
@@ -201,8 +258,8 @@ async def get_unmatched_items(db: AsyncSession = Depends(get_db)):
         prev_item = prev_result.scalars().first()
         
         old_price = float(prev_item.price_resident_kzt) if prev_item else None
-        new_price = float(item.price_resident_kzt)
-        new_price_nonresident = float(item.price_nonresident_kzt)
+        new_price = float(item.price_resident_kzt) if item.price_resident_kzt is not None else 0.0
+        new_price_nonresident = float(item.price_nonresident_kzt) if item.price_nonresident_kzt is not None else 0.0
         diff_str = ""
         if old_price:
             diff = new_price - old_price
@@ -220,12 +277,21 @@ async def get_unmatched_items(db: AsyncSession = Depends(get_db)):
             "new_price_nonresident": new_price_nonresident,
             "diff": diff_str,
             "status": "anomaly" if item.verification_note else "unmatched",
-            "note": item.verification_note
+            "note": item.verification_note,
+            "partner_name": item.partner.name if item.partner else None,
+            "file_name": item.document.file_name if item.document else None
         })
     return response
 
 @router.post("/match/{item_id}")
-async def match_item(item_id: int, service_id: int, price: float, price_nonresident: float, raw_name: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def match_item(
+    item_id: int,
+    service_id: Optional[int] = None,
+    price: Optional[float] = None,
+    price_nonresident: Optional[float] = None,
+    raw_name: str = Query(...),
+    db: AsyncSession = Depends(get_db)
+):
     """
     Ручное подтверждение (или корректировка) оператором.
     """
@@ -239,6 +305,17 @@ async def match_item(item_id: int, service_id: int, price: float, price_nonresid
     # Архивация старой версии (по ТЗ: старая версия архивируется, не удаляется)
     item.is_active = False
     
+    # Деактивируем любые другие активные цены для этого партнера и названия услуги
+    deactivate_stmt = select(PriceItem).where(
+        PriceItem.partner_id == item.partner_id,
+        PriceItem.service_name_raw == raw_name,
+        PriceItem.is_active == True,
+        PriceItem.id != item.id
+    )
+    deactivate_result = await db.execute(deactivate_stmt)
+    for old_item in deactivate_result.scalars().all():
+        old_item.is_active = False
+
     # Создание новой бессрочной версии с внесенными правками
     new_item = PriceItem(
         document_id=item.document_id,
@@ -260,3 +337,18 @@ async def match_item(item_id: int, service_id: int, price: float, price_nonresid
     db.add(new_item)
     await db.commit()
     return {"status": "ok", "message": "Связь подтверждена"}
+
+@router.delete("/reject/{item_id}")
+async def reject_item(item_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Отклонение (удаление) позиции из очереди верификации.
+    """
+    stmt = select(PriceItem).where(PriceItem.id == item_id)
+    result = await db.execute(stmt)
+    item = result.scalars().first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Позиция не найдена")
+        
+    await db.delete(item)
+    await db.commit()
+    return {"status": "ok", "message": "Позиция отклонена"}

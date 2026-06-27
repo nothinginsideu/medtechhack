@@ -1,12 +1,14 @@
 import docx
 import typing
-from app.parsers.base import BaseParser, ParsedItem
+from app.parsers.base import BaseParser, ParsedItem, detect_currency
 import re
 
 class WordParser(BaseParser):
     def parse(self) -> typing.List[ParsedItem]:
         doc = docx.Document(self.file_path)
         items = []
+        
+        file_currency = detect_currency("", self.file_path)
         
         ns = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'
         for table in doc.tables:
@@ -22,10 +24,22 @@ class WordParser(BaseParser):
                     
                     if name_cell:
                         try:
-                            price_val = float(str(price_cell).replace(" ", "").replace(",", "."))
+                            # Detect currency from cell or filename
+                            cell_currency = detect_currency(price_cell)
+                            currency = cell_currency if cell_currency != "KZT" else file_currency
+                            
+                            # Clean price cell
+                            price_str = str(price_cell).replace(" ", "").replace(",", ".").replace("тг", "").replace("kzt", "").replace("₸", "").replace("$", "").replace("usd", "").replace("rub", "").replace("руб", "").strip()
+                            price_val = float(price_str)
+                            
+                            # Skip if KZT and price < 100
+                            if currency == "KZT" and price_val < 100:
+                                continue
+                                
                             item = ParsedItem(
                                 service_name_raw=name_cell,
-                                price_resident_kzt=price_val
+                                price_resident_kzt=price_val,
+                                currency_original=currency
                             )
                             item.validate_prices()
                             items.append(item)
@@ -33,3 +47,4 @@ class WordParser(BaseParser):
                             continue
                         
         return items
+

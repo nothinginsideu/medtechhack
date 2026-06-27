@@ -1,15 +1,17 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
-import { CheckCircle2, AlertTriangle, FileText, Activity, UploadCloud, Loader2 } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, FileText, Activity, UploadCloud, Loader2, RefreshCw } from 'lucide-react';
 
 export default function AdminDashboard() {
   const [anomalies, setAnomalies] = useState([]);
   const [stats, setStats] = useState({
-    processed: 124,
-    automationScore: 82,
+    processed: 0,
+    automationScore: 0,
     inQueue: 0,
-    activeClinics: 42
+    activeClinics: 0
   });
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [isLive, setIsLive] = useState(false);
   
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState('');
@@ -19,14 +21,41 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     fetchAnomalies();
+    fetchStats();
+
+    // Poll stats every 5 seconds
+    const statsInterval = setInterval(() => {
+      fetchStats();
+    }, 5000);
+
+    // Poll anomaly queue every 15 seconds
+    const anomalyInterval = setInterval(() => {
+      fetchAnomalies();
+    }, 15000);
+
+    return () => {
+      clearInterval(statsInterval);
+      clearInterval(anomalyInterval);
+    };
   }, []);
+
+  const fetchStats = async () => {
+    try {
+      const response = await axios.get('http://localhost:8000/api/v1/admin/stats');
+      setStats(response.data);
+      setLastUpdated(new Date());
+      setIsLive(true);
+    } catch (error) {
+      console.error("Ошибка при загрузке статистики:", error);
+      setIsLive(false);
+    }
+  };
 
   const fetchAnomalies = async () => {
     setLoading(true);
     try {
       const response = await axios.get('http://localhost:8000/api/v1/admin/unmatched');
       setAnomalies(response.data);
-      setStats(prev => ({ ...prev, inQueue: response.data.length }));
     } catch (error) {
       console.error("Ошибка при загрузке аномалий:", error);
     } finally {
@@ -57,7 +86,10 @@ export default function AdminDashboard() {
       });
       setUploadMessage(`Успешно: ${response.data.message}`);
       // В реальном приложении здесь можно запустить поллинг или WebSockets
-      setTimeout(fetchAnomalies, 5000); 
+      setTimeout(() => {
+        fetchAnomalies();
+        fetchStats();
+      }, 5000); 
     } catch (error) {
       setUploadMessage(`Ошибка: ${error.response?.data?.detail || error.message}`);
     } finally {
@@ -73,14 +105,40 @@ export default function AdminDashboard() {
   const handleApprove = async (id, serviceId, newPrice, newPriceNonresident, rawName) => {
     setLoading(true);
     try {
-      // POST with the updated rawName and both prices
-      const response = await axios.post(`http://localhost:8000/api/v1/admin/match/${id}?service_id=${serviceId}&price=${newPrice}&price_nonresident=${newPriceNonresident}&raw_name=${encodeURIComponent(rawName)}`);
+      const params = new URLSearchParams();
+      params.append('raw_name', rawName);
+      if (serviceId !== null && serviceId !== undefined && !isNaN(serviceId)) {
+        params.append('service_id', serviceId);
+      }
+      if (newPrice !== null && newPrice !== undefined && !isNaN(newPrice)) {
+        params.append('price', newPrice);
+      }
+      if (newPriceNonresident !== null && newPriceNonresident !== undefined && !isNaN(newPriceNonresident)) {
+        params.append('price_nonresident', newPriceNonresident);
+      }
+
+      const response = await axios.post(`http://localhost:8000/api/v1/admin/match/${id}?${params.toString()}`);
       if (response.status === 200) {
         setAnomalies(prev => prev.filter(a => a.id !== id));
-        setStats(prev => ({ ...prev, inQueue: prev.inQueue - 1 }));
+        fetchStats();
       }
     } catch (error) {
       console.error("Ошибка при подтверждении:", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleReject = async (id) => {
+    setLoading(true);
+    try {
+      const response = await axios.delete(`http://localhost:8000/api/v1/admin/reject/${id}`);
+      if (response.status === 200) {
+        setAnomalies(prev => prev.filter(a => a.id !== id));
+        fetchStats();
+      }
+    } catch (error) {
+      console.error("Ошибка при отклонении:", error);
     } finally {
       setLoading(false);
     }
@@ -129,43 +187,78 @@ export default function AdminDashboard() {
       </div>
 
       {/* Dashboard Widgets */}
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          {isLive ? (
+            <div className="flex items-center gap-1.5 text-[#059669] text-xs font-medium">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#059669] opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-[#059669]"></span>
+              </span>
+              В реальном времени
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 text-[#9CA3AF] text-xs">
+              <span className="h-2 w-2 rounded-full bg-[#9CA3AF]"></span>
+              Нет соединения
+            </div>
+          )}
+          {lastUpdated && (
+            <span className="text-[#9CA3AF] text-[11px]">
+              Обновлено: {lastUpdated.toLocaleTimeString('ru-RU')}
+            </span>
+          )}
+        </div>
+        <button
+          onClick={() => { fetchStats(); fetchAnomalies(); }}
+          className="flex items-center gap-1.5 text-xs text-[#4B5563] hover:text-[#111827] transition-colors cursor-pointer"
+          title="Обновить сейчас"
+        >
+          <RefreshCw size={13} />
+          Обновить
+        </button>
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-white border border-[#E5E7EB] rounded-md p-6 shadow-sm">
+        <div className="bg-white border border-[#E5E7EB] rounded-md p-6 shadow-sm transition-all">
           <div className="flex items-center gap-3 text-[#6B7280] mb-2">
             <FileText size={20} />
             <h3 className="font-medium text-sm">Обработано прайсов</h3>
           </div>
-          <div className="text-3xl font-bold text-[#111827]">{stats.processed}</div>
+          <div className="text-3xl font-bold text-[#111827] tabular-nums transition-all duration-300">{stats.processed}</div>
+          <div className="text-[11px] text-[#9CA3AF] mt-1">документов распознано</div>
         </div>
         
-        <div className="bg-white border border-[#E5E7EB] rounded-md p-6 shadow-sm">
+        <div className="bg-white border border-[#E5E7EB] rounded-md p-6 shadow-sm transition-all">
           <div className="flex items-center gap-3 text-[#6B7280] mb-2">
             <CheckCircle2 size={20} />
             <h3 className="font-medium text-sm">Автонормализация</h3>
           </div>
           <div className="flex items-end gap-2">
-            <div className="text-3xl font-bold text-[#059669]">{stats.automationScore}%</div>
+            <div className="text-3xl font-bold text-[#059669] tabular-nums transition-all duration-300">{stats.automationScore}%</div>
             <span className="text-xs text-[#6B7280] mb-1">цель: 70%</span>
           </div>
           <div className="w-full bg-[#F3F4F6] h-1.5 rounded-full mt-3 overflow-hidden">
-            <div className="bg-[#059669] h-full rounded-full" style={{ width: `${stats.automationScore}%` }}></div>
+            <div className="bg-[#059669] h-full rounded-full transition-all duration-700" style={{ width: `${Math.min(stats.automationScore, 100)}%` }}></div>
           </div>
         </div>
 
-        <div className="bg-white border border-[#E5E7EB] rounded-md p-6 shadow-sm">
+        <div className="bg-white border border-[#E5E7EB] rounded-md p-6 shadow-sm transition-all">
           <div className="flex items-center gap-3 text-[#6B7280] mb-2">
             <AlertTriangle size={20} />
             <h3 className="font-medium text-sm">В очереди (Аномалии)</h3>
           </div>
-          <div className="text-3xl font-bold text-[#DC2626]">{stats.inQueue}</div>
+          <div className="text-3xl font-bold text-[#DC2626] tabular-nums transition-all duration-300">{stats.inQueue.toLocaleString('ru-RU')}</div>
+          <div className="text-[11px] text-[#9CA3AF] mt-1">ждут верификации оператора</div>
         </div>
 
-        <div className="bg-white border border-[#E5E7EB] rounded-md p-6 shadow-sm">
+        <div className="bg-white border border-[#E5E7EB] rounded-md p-6 shadow-sm transition-all">
           <div className="flex items-center gap-3 text-[#6B7280] mb-2">
             <Activity size={20} />
             <h3 className="font-medium text-sm">Активных клиник</h3>
           </div>
-          <div className="text-3xl font-bold text-[#111827]">{stats.activeClinics}</div>
+          <div className="text-3xl font-bold text-[#111827] tabular-nums transition-all duration-300">{stats.activeClinics}</div>
+          <div className="text-[11px] text-[#9CA3AF] mt-1">с актуальными прайсами</div>
         </div>
       </div>
 
@@ -186,6 +279,15 @@ export default function AdminDashboard() {
                 key={item.id} 
                 className={`border rounded-md overflow-hidden shadow-sm ${item.status === 'anomaly' ? 'border-[#FBBF24] bg-[#FEFCE8]' : 'border-[#E5E7EB] bg-white'}`}
               >
+                {/* Clinic & File Header Info */}
+                <div className="bg-[#F9FAFB] border-b border-[#E5E7EB] px-5 py-2 flex justify-between items-center text-xs text-[#4B5563]">
+                  <div className="font-semibold flex items-center gap-1">
+                    <span className="text-[#9CA3AF]">Клиника:</span> {item.partner_name || 'Неизвестная клиника'}
+                  </div>
+                  <div className="text-[#6B7280]">
+                    <span className="text-[#9CA3AF]">Файл:</span> {item.file_name || 'Неизвестный файл'}
+                  </div>
+                </div>
                 {item.status === 'anomaly' && (
                   <div className="bg-[#FEFCE8] border-b border-[#FBBF24] px-5 py-2 text-xs text-[#B45309] font-medium flex items-center gap-2">
                     <AlertTriangle size={14} />
@@ -257,12 +359,19 @@ export default function AdminDashboard() {
                           handleApprove(item.id, item.suggested_service_id, parseFloat(item.new_price), parseFloat(item.new_price_nonresident), item.raw_name);
                         }}
                         disabled={loading}
-                        className="flex-1 bg-[#111827] hover:bg-[#374151] text-white px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
+                        className="bg-[#10B981] hover:bg-[#059669] text-white px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex-1"
                       >
                         Подтвердить
                       </button>
-                      <button className="flex-1 bg-white border border-[#D1D5DB] hover:bg-[#F3F4F6] text-[#374151] px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
-                        Настроить вручную
+                      <button 
+                        onClick={() => handleReject(item.id)}
+                        disabled={loading}
+                        className="bg-[#EF4444] hover:bg-[#DC2626] text-white px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex-1"
+                      >
+                        Отклонить
+                      </button>
+                      <button className="bg-white border border-[#D1D5DB] hover:bg-[#F3F4F6] text-[#374151] px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex-1">
+                        Вручную
                       </button>
                     </div>
                   </div>

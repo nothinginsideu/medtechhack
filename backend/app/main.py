@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.api.routes import search, partners, admin
+from app.api.routes import search, partners, admin, services
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -18,6 +18,7 @@ app.add_middleware(
 
 app.include_router(search.router, prefix=f"{settings.API_V1_STR}", tags=["Search"])
 app.include_router(partners.router, prefix=f"{settings.API_V1_STR}/partners", tags=["Partners"])
+app.include_router(services.router, prefix=f"{settings.API_V1_STR}/services", tags=["Services"])
 app.include_router(admin.router, prefix=f"{settings.API_V1_STR}/admin", tags=["Admin"])
 
 @app.get("/")

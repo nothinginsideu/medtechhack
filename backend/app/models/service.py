@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean
+from sqlalchemy import Column, Integer, String, Boolean, JSON
 from sqlalchemy.orm import relationship
 from app.models.base import Base
 
@@ -16,6 +16,7 @@ class Service(Base):
     is_active = Column(Boolean, default=True)
     name_ru = Column(String, index=True, nullable=False)
     tarificator_code = Column(String, nullable=True)
+    synonyms = Column(JSON, nullable=True)
 
     # Связь с конкретными ценами клиник (1 ко многим)
     price_items = relationship("PriceItem", back_populates="service")

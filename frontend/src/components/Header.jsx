@@ -2,7 +2,7 @@ import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Building2, LayoutDashboard, Search } from 'lucide-react';
 
-export default function Header() {
+export default function Header({ selectedCity, setSelectedCity }) {
   const location = useLocation();
   const isAdmin = location.pathname.includes('/admin');
 
@@ -17,10 +17,14 @@ export default function Header() {
           {!isAdmin && (
             <div className="hidden md:flex items-center gap-2 text-sm text-[#6B7280]">
               <Building2 size={16} />
-              <select className="bg-transparent outline-none border-none cursor-pointer hover:text-[#111827] transition-colors">
-                <option>Астана</option>
-                <option>Алматы</option>
-                <option>Шымкент</option>
+              <select 
+                value={selectedCity}
+                onChange={(e) => setSelectedCity && setSelectedCity(e.target.value)}
+                className="bg-transparent outline-none border-none cursor-pointer hover:text-[#111827] transition-colors font-medium text-[#111827]"
+              >
+                <option value="Астана">Астана</option>
+                <option value="Алматы">Алматы</option>
+                <option value="Шымкент">Шымкент</option>
               </select>
             </div>
           )}

@@ -21,6 +21,21 @@ class ParsedItem(BaseModel):
             if self.price_nonresident_kzt < self.price_resident_kzt:
                 raise ValueError("Цена нерезидента не может быть меньше цены резидента")
 
+
+def detect_currency(text: str = "", filename: str = "") -> str:
+    """
+    Detects the currency (USD, RUB, or defaults to KZT) from a string and/or filename.
+    """
+    t_lower = text.lower() if text else ""
+    f_lower = filename.lower() if filename else ""
+    
+    if "$" in t_lower or "usd" in t_lower or "$" in f_lower or "usd" in f_lower or "dollar" in f_lower or "доллар" in f_lower:
+        return "USD"
+    if "rub" in t_lower or "руб" in t_lower or "rub" in f_lower or "руб" in f_lower or "рубл" in f_lower:
+        return "RUB"
+    return "KZT"
+
+
 class BaseParser(abc.ABC):
     """
     Базовый класс для всех парсеров прайс-листов.

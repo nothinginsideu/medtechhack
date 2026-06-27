@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import joinedload
+from typing import Optional, List
 
 from app.db.database import get_db
 from app.models.service import Service
@@ -18,17 +19,75 @@ async def search_services(
     """
     Поиск по эталонным услугам и возврат цен в клиниках. Возвращает полные данные партнера для модалки.
     """
-    norm_query = Normalizer.normalize_text(q)
+    from sqlalchemy import or_, and_
+    import re
     
-    # Используем ILIKE для простого поиска, но на фронтенде убрали моки, так что пустой поиск не сломается.
-    # В идеале здесь должен быть полнотекстовый поиск PostgreSQL или RapidFuzz по синонимам.
-    # Для целей MVP ILIKE по нормализованному запросу работает адекватно (если нормализация не вернула пустую строку).
-    if not norm_query:
+    # 1. Stop words to ignore for better matching
+    STOP_WORDS = {
+        'врач', 'врача', 'врачи', 'услуга', 'услуги', 'сдать', 'сделать', 'пройти', 
+        'клиника', 'клиники', 'центр', 'анализ', 'анализы', 'цена', 'цены', 'стоимость',
+        'руб', 'тенге', 'тг', 'kzt', 'в', 'на', 'и', 'или', 'с', 'по', 'для', 'прием'
+    }
+    
+    # Simple stemmer to strip word endings (Russian plural/case forms)
+    def stem_word(word: str) -> str:
+        word = word.lower().strip()
+        # Remove common Russian case/gender endings if word is long enough
+        suffixes = ['ого', 'его', 'ому', 'ему', 'ое', 'ая', 'ои', 'ые', 'ых', 'их', 'ам', 'ям', 'а', 'я', 'о', 'е', 'и', 'ы', 'у', 'ю', 'ом', 'ем', 'ой', 'ей', 'ь']
+        for suffix in suffixes:
+            if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+                return word[:-len(suffix)]
+        return word
+
+    # Clean and tokenize query
+    clean_query = q.lower()
+    raw_words = re.findall(r'[a-zA-Zа-яА-Я0-9-+]+', clean_query)
+    
+    # Filter stop-words and stem
+    words = []
+    for w in raw_words:
+        if w not in STOP_WORDS:
+            stemmed = stem_word(w)
+            if len(stemmed) >= 2:
+                words.append(stemmed)
+                
+    # If all words were stop words, fallback to using raw words
+    if not words:
+        words = [stem_word(w) for w in raw_words if len(w) >= 2]
+        
+    if not words:
         return []
 
-    stmt = select(Service).where(Service.name_ru.ilike(f"%{norm_query}%")).options(
-        joinedload(Service.price_items).joinedload(PriceItem.document),
-        joinedload(Service.price_items).joinedload(PriceItem.partner)
+    # Build logical AND across all search terms. Each term must match either Service name, specialty, or raw item name
+    conditions = []
+    for word in words:
+        conditions.append(
+            or_(
+                Service.name_ru.ilike(f"%{word}%"),
+                Service.specialty.ilike(f"%{word}%"),
+                and_(
+                    PriceItem.service_name_raw.ilike(f"%{word}%"),
+                    PriceItem.is_active == True,
+                    PriceItem.is_verified == True
+                )
+            )
+        )
+
+    # Executing search query joining PriceItems (only verified and active)
+    stmt = (
+        select(Service)
+        .join(PriceItem, PriceItem.service_id == Service.id)
+        .where(
+            and_(
+                PriceItem.is_active == True,
+                PriceItem.is_verified == True,
+                *conditions
+            )
+        )
+        .options(
+            joinedload(Service.price_items).joinedload(PriceItem.document),
+            joinedload(Service.price_items).joinedload(PriceItem.partner)
+        )
     )
     
     result = await db.execute(stmt)
@@ -38,7 +97,7 @@ async def search_services(
     for svc in services:
         prices = []
         for p_item in svc.price_items:
-            if not p_item.is_active:
+            if not p_item.is_active or not p_item.is_verified:
                 continue
             
             partner = p_item.partner
@@ -64,6 +123,73 @@ async def search_services(
                 "specialty": svc.specialty,
                 "prices": sorted(prices, key=lambda x: x["price_resident"] if x["price_resident"] else float('inf'))
             })
+
+    # Search matching unlinked or unverified price items
+    price_conditions = []
+    for word in words:
+        price_conditions.append(PriceItem.service_name_raw.ilike(f"%{word}%"))
+
+    price_stmt = (
+        select(PriceItem)
+        .where(
+            and_(
+                or_(
+                    PriceItem.service_id == None,
+                    PriceItem.is_verified == False
+                ),
+                PriceItem.is_active == True,
+                *price_conditions
+            )
+        )
+        .options(
+            joinedload(PriceItem.document),
+            joinedload(PriceItem.partner)
+        )
+        .limit(300)
+    )
+
+    price_result = await db.execute(price_stmt)
+    unlinked_items = price_result.scalars().all()
+
+    unlinked_groups = {}
+    for p_item in unlinked_items:
+        key = p_item.service_name_raw.strip()
+        if not key:
+            continue
+            
+        group_key = key.lower()
+        partner = p_item.partner
+        if not partner:
+            continue
+
+        price_data = {
+            "partner_id": partner.id,
+            "partner_name": partner.name,
+            "partner_address": partner.address,
+            "partner_city": partner.city,
+            "partner_bin": partner.bin,
+            "partner_phone": partner.contact_phone,
+            "price_resident": p_item.price_resident_kzt,
+            "price_nonresident": p_item.price_nonresident_kzt,
+            "price_original": p_item.price_original,
+            "currency_original": p_item.currency_original.value if p_item.currency_original else "KZT",
+            "original_name": p_item.service_name_raw,
+            "date": p_item.effective_date.strftime("%d %b %Y") if p_item.effective_date else None
+        }
+
+        if group_key not in unlinked_groups:
+            unlinked_groups[group_key] = {
+                "service_id": f"unlinked_{p_item.id}",
+                "name": key,
+                "specialty": "Общая",
+                "prices": []
+            }
+        unlinked_groups[group_key]["prices"].append(price_data)
+
+    # Sort prices and merge unlinked groups into final response
+    for group in unlinked_groups.values():
+        group["prices"] = sorted(group["prices"], key=lambda x: x["price_resident"] if x["price_resident"] is not None else float('inf'))
+        response.append(group)
         
     return response
 
@@ -109,4 +235,141 @@ async def get_partner_details(partner_id: int, db: AsyncSession = Depends(get_db
         "phone": partner.contact_phone,
         "email": partner.contact_email,
         "price_list": price_list
+    }
+
+@router.get("/partners/{partner_id}/history")
+async def get_price_history(
+    partner_id: int,
+    service_id: Optional[int] = Query(None),
+    raw_name: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Получение истории изменения цен для конкретного партнера и услуги.
+    """
+    stmt = select(PriceItem).where(
+        PriceItem.partner_id == partner_id
+    )
+    
+    if service_id is not None:
+        stmt = stmt.where(PriceItem.service_id == service_id)
+    elif raw_name:
+        stmt = stmt.where(PriceItem.service_name_raw.ilike(raw_name.strip()))
+    else:
+        return []
+        
+    stmt = stmt.order_by(PriceItem.effective_date.asc())
+    result = await db.execute(stmt)
+    items = result.scalars().all()
+    
+    history = []
+    seen_dates = set()
+    for item in items:
+        if not item.effective_date:
+            continue
+        date_str = item.effective_date.strftime("%Y-%m-%d")
+        
+        if date_str in seen_dates:
+            for h in history:
+                if h["date"] == date_str and (item.is_active or not h["is_active"]):
+                    h["price"] = float(item.price_resident_kzt) if item.price_resident_kzt is not None else 0
+                    h["price_nonresident"] = float(item.price_nonresident_kzt) if item.price_nonresident_kzt is not None else 0
+                    h["is_active"] = item.is_active
+            continue
+            
+        seen_dates.add(date_str)
+        history.append({
+            "date": date_str,
+            "year": item.effective_date.year,
+            "price": float(item.price_resident_kzt) if item.price_resident_kzt is not None else 0,
+            "price_nonresident": float(item.price_nonresident_kzt) if item.price_nonresident_kzt is not None else 0,
+            "is_active": item.is_active
+        })
+        
+    return history
+
+from pydantic import BaseModel
+
+class AssistantRequest(BaseModel):
+    message: str
+
+@router.post("/search/assistant")
+async def chat_assistant(
+    payload: AssistantRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Интерактивный медицинский ИИ-ассистент, рекомендующий исследования/врачей по симптомам и находящий цены.
+    """
+    import google.generativeai as genai
+    from app.core.config import settings
+    import json
+    
+    if not settings.GEMINI_API_KEY:
+        return {
+            "analysis": "Сервис временно недоступен: отсутствует API-ключ ИИ.",
+            "recommendations": ["Пожалуйста, обратитесь к врачу общей практики."],
+            "services": []
+        }
+        
+    genai.configure(api_key=settings.GEMINI_API_KEY)
+    
+    prompt = f"""
+    Ты — умный медицинский ассистент MedPartners.
+    Пациент жалуется на симптомы: "{payload.message}"
+    
+    1. Проанализируй жалобу и кратко опиши, к какому врачу или на какие анализы/исследования ему стоит обратить внимание.
+    2. Выдели список из 1-3 ключевых фраз (например: "прием терапевта", "узи брюшной полости", "общий анализ крови") для поиска в нашей базе цен.
+    
+    Верни ответ строго в формате JSON со следующими полями:
+    - "analysis": Краткое описание проблемы и советы на русском языке.
+    - "recommendations": Список конкретных рекомендаций (например, "Записаться к терапевту", "Сдать общий анализ крови").
+    - "search_queries": Список текстовых запросов для поиска по прайс-листам медицинских услуг (каждый запрос должен быть простым словосочетанием на русском языке, например: ["прием терапевта", "узи"]).
+    
+    JSON:
+    """
+    
+    try:
+        model = genai.GenerativeModel('models/gemini-2.5-flash')
+        response = model.generate_content(prompt)
+        text_response = response.text.strip()
+        
+        if text_response.startswith("```json"):
+            text_response = text_response[7:]
+        if text_response.endswith("```"):
+            text_response = text_response[:-3]
+        text_response = text_response.strip()
+        
+        data = json.loads(text_response)
+        
+        analysis = data.get("analysis", "Не удалось проанализировать симптомы.")
+        recommendations = data.get("recommendations", [])
+        search_queries = data.get("search_queries", [])
+    except Exception as e:
+        print(f"Ошибка при работе с Gemini: {e}")
+        return {
+            "analysis": "Произошла ошибка при анализе симптомов ИИ. Попробуйте перефразировать ваш запрос.",
+            "recommendations": ["Рекомендуем проконсультироваться с терапевтом."],
+            "services": []
+        }
+        
+    services_found = []
+    seen_service_ids = set()
+    
+    for query in search_queries:
+        try:
+            results = await search_services(q=query, db=db)
+            for res in results:
+                srv_id = res.get("service_id")
+                if srv_id in seen_service_ids:
+                    continue
+                seen_service_ids.add(srv_id)
+                services_found.append(res)
+        except Exception as search_err:
+            print(f"Ошибка поиска для '{query}': {search_err}")
+            
+    return {
+        "analysis": analysis,
+        "recommendations": recommendations,
+        "services": services_found
     }

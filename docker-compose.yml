@@ -35,6 +35,10 @@ services:
       - DB_PORT=5432
       - DB_NAME=${POSTGRES_DB:-medpartners}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OMP_NUM_THREADS=2
+      - MKL_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=2
+      - NUMEXPR_NUM_THREADS=2
     depends_on:
       db:
         condition: service_healthy
