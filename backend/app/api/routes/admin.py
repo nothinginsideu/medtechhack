@@ -39,8 +39,8 @@ async def process_documents_task(documents_to_process: list):
                 parsed_items = await asyncio.to_thread(parser.parse)
                 
                 # Historical USD and RUB rate logic
-                historic_usd_rates = {2024: 450, 2025: 480, 2026: 485}
-                historic_rub_rates = {2024: 5.0, 2025: 5.2, 2026: 5.3}
+                historic_usd_rates = {2020: 413, 2021: 426, 2022: 460, 2023: 456, 2024: 450, 2025: 480, 2026: 485}
+                historic_rub_rates = {2020: 5.7, 2021: 5.8, 2022: 6.7, 2023: 5.3, 2024: 5.0, 2025: 5.2, 2026: 5.3}
                 year = doc.effective_date.year if doc.effective_date else date.today().year
                 usd_rate = historic_usd_rates.get(year, 480)
                 rub_rate = historic_rub_rates.get(year, 5.2)
@@ -77,17 +77,19 @@ async def process_documents_task(documents_to_process: list):
                     verification_note = None
                     
                     try:
-                        price_resident = float(price_resident)
-                        price_nonresident = float(price_nonresident)
-                    except (ValueError, TypeError):
-                        price_resident = 0.0
-                        price_nonresident = 0.0
+                        from decimal import Decimal, InvalidOperation
+                        price_resident = Decimal(str(price_resident))
+                        price_nonresident = Decimal(str(price_nonresident))
+                    except (ValueError, TypeError, InvalidOperation):
+                        price_resident = Decimal('0')
+                        price_nonresident = Decimal('0')
                         
                     # Protect against Numeric(10,2) overflow (max 99,999,999.99)
-                    if price_resident > 99000000:
-                        price_resident = 99000000.0
-                    if price_nonresident > 99000000:
-                        price_nonresident = 99000000.0
+                    max_price = Decimal('99000000')
+                    if price_resident > max_price:
+                        price_resident = max_price
+                    if price_nonresident > max_price:
+                        price_nonresident = max_price
                         
                     if price_resident <= 0:
                         needs_review = True
@@ -100,18 +102,18 @@ async def process_documents_task(documents_to_process: list):
                     currency = getattr(item_data, "currency_original", "KZT")
                     price_original = price_resident
                     if currency == "USD":
-                        price_resident = price_resident * usd_rate
-                        price_nonresident = price_nonresident * usd_rate
+                        price_resident = price_resident * Decimal(str(usd_rate))
+                        price_nonresident = price_nonresident * Decimal(str(usd_rate))
                     elif currency == "RUB":
-                        price_resident = price_resident * rub_rate
-                        price_nonresident = price_nonresident * rub_rate
+                        price_resident = price_resident * Decimal(str(rub_rate))
+                        price_nonresident = price_nonresident * Decimal(str(rub_rate))
                     
                     # Anomaly detection > 50%
                     prev_item = prev_prices_dict.get(raw_name)
                     
                     if prev_item and prev_item.price_resident_kzt:
-                        diff_ratio = abs(price_resident - float(prev_item.price_resident_kzt)) / float(prev_item.price_resident_kzt)
-                        if diff_ratio > 0.5:
+                        diff_ratio = abs(price_resident - Decimal(str(prev_item.price_resident_kzt))) / Decimal(str(prev_item.price_resident_kzt))
+                        if diff_ratio > Decimal('0.5'):
                             needs_review = True
                             verification_note = f"Аномальный скачок цены (>{int(diff_ratio*100)}%)"
     

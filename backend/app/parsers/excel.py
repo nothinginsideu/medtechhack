@@ -1,6 +1,7 @@
 import openpyxl
 import typing
 from app.parsers.base import BaseParser, ParsedItem, detect_currency
+from decimal import Decimal, InvalidOperation
 import re
 
 class ExcelParser(BaseParser):
@@ -62,9 +63,9 @@ class ExcelParser(BaseParser):
                         currency = cell_currency if cell_currency != "KZT" else header_currency
                         
                         price_str = cell_str.replace(" ", "").replace(",", ".").replace("тг", "").replace("kzt", "").replace("₸", "").replace("$", "").replace("usd", "").replace("rub", "").replace("руб", "").strip()
-                        price_val = float(price_str)
+                        price_val = Decimal(price_str)
                         
-                        if currency == "KZT" and price_val < 100:
+                        if currency == "KZT" and price_val < Decimal('100'):
                             continue
                         
                         item = ParsedItem(
@@ -75,7 +76,7 @@ class ExcelParser(BaseParser):
                         )
                         item.validate_prices()
                         items.append(item)
-                    except ValueError:
+                    except (ValueError, InvalidOperation):
                         continue
                         
         return items

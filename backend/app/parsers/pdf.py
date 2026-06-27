@@ -4,6 +4,7 @@ from PIL import Image
 import typing
 import re
 from app.parsers.base import BaseParser, ParsedItem, detect_currency
+from decimal import Decimal, InvalidOperation
 import io
 
 class PDFParser(BaseParser):
@@ -50,13 +51,13 @@ class PDFParser(BaseParser):
             # Находим все числа, похожие на цены
             prices_str = re.findall(r'\b([1-9]\d{0,2}(?:\s?\d{3})*(?:[.,]\d{1,2})?)\b', line)
             valid_prices = []
-            threshold = 100 if currency == "KZT" else 1.0
+            threshold = Decimal('100') if currency == "KZT" else Decimal('1.0')
             for p in prices_str:
                 try:
-                    val = float(p.replace(" ", "").replace(",", "."))
+                    val = Decimal(p.replace(" ", "").replace(",", "."))
                     if val >= threshold:
                         valid_prices.append(val)
-                except ValueError:
+                except (ValueError, InvalidOperation):
                     pass
             
             if valid_prices:

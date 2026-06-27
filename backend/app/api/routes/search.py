@@ -9,6 +9,17 @@ from app.models.service import Service
 from app.models.price_item import PriceItem
 from app.matching.normalizer import Normalizer
 
+SERVICE_CACHE = {}
+
+async def get_service_cache(db: AsyncSession) -> dict:
+    global SERVICE_CACHE
+    if not SERVICE_CACHE:
+        stmt = select(Service.id, Service.name_ru).where(Service.is_active == True)
+        result = await db.execute(stmt)
+        for row in result.all():
+            SERVICE_CACHE[row[0]] = row[1]
+    return SERVICE_CACHE
+
 router = APIRouter()
 
 @router.get("/search")
@@ -191,6 +202,64 @@ async def search_services(
         group["prices"] = sorted(group["prices"], key=lambda x: x["price_resident"] if x["price_resident"] is not None else float('inf'))
         response.append(group)
         
+    if not response:
+        # Fallback to RapidFuzz
+        from rapidfuzz import process, fuzz
+        
+        cache = await get_service_cache(db)
+        matches = process.extract(q, cache, limit=5, scorer=fuzz.token_set_ratio, score_cutoff=60)
+        
+        if matches:
+            matched_ids = [m[2] for m in matches]
+            
+            fallback_stmt = (
+                select(Service)
+                .join(PriceItem, PriceItem.service_id == Service.id)
+                .where(
+                    and_(
+                        Service.id.in_(matched_ids),
+                        PriceItem.is_active == True,
+                        PriceItem.is_verified == True
+                    )
+                )
+                .options(
+                    joinedload(Service.price_items).joinedload(PriceItem.document),
+                    joinedload(Service.price_items).joinedload(PriceItem.partner)
+                )
+            )
+            fallback_result = await db.execute(fallback_stmt)
+            fallback_services = fallback_result.unique().scalars().all()
+            
+            for svc in fallback_services:
+                prices = []
+                for p_item in svc.price_items:
+                    if not p_item.is_active or not p_item.is_verified:
+                        continue
+                    
+                    partner = p_item.partner
+                    prices.append({
+                        "partner_id": partner.id,
+                        "partner_name": partner.name,
+                        "partner_address": partner.address,
+                        "partner_city": partner.city,
+                        "partner_bin": partner.bin,
+                        "partner_phone": partner.contact_phone,
+                        "price_resident": p_item.price_resident_kzt,
+                        "price_nonresident": p_item.price_nonresident_kzt,
+                        "price_original": p_item.price_original,
+                        "currency_original": p_item.currency_original.value if p_item.currency_original else "KZT",
+                        "original_name": p_item.service_name_raw,
+                        "date": p_item.effective_date.strftime("%d %b %Y") if p_item.effective_date else None
+                    })
+                    
+                if prices:
+                    response.append({
+                        "service_id": svc.id,
+                        "name": svc.name_ru,
+                        "specialty": svc.specialty,
+                        "prices": sorted(prices, key=lambda x: x["price_resident"] if x["price_resident"] is not None else float('inf'))
+                    })
+
     return response
 
 @router.get("/partner/{partner_id}")

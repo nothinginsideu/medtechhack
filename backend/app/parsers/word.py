@@ -1,6 +1,7 @@
 import docx
 import typing
 from app.parsers.base import BaseParser, ParsedItem, detect_currency
+from decimal import Decimal, InvalidOperation
 import re
 
 class WordParser(BaseParser):
@@ -30,10 +31,10 @@ class WordParser(BaseParser):
                             
                             # Clean price cell
                             price_str = str(price_cell).replace(" ", "").replace(",", ".").replace("тг", "").replace("kzt", "").replace("₸", "").replace("$", "").replace("usd", "").replace("rub", "").replace("руб", "").strip()
-                            price_val = float(price_str)
+                            price_val = Decimal(price_str)
                             
                             # Skip if KZT and price < 100
-                            if currency == "KZT" and price_val < 100:
+                            if currency == "KZT" and price_val < Decimal('100'):
                                 continue
                                 
                             item = ParsedItem(
@@ -43,7 +44,7 @@ class WordParser(BaseParser):
                             )
                             item.validate_prices()
                             items.append(item)
-                        except ValueError:
+                        except (ValueError, InvalidOperation):
                             continue
                         
         return items

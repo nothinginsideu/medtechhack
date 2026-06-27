@@ -1,17 +1,18 @@
 import abc
 import typing
 from pydantic import BaseModel, Field, field_validator
+from decimal import Decimal
 
 class ParsedItem(BaseModel):
     service_name_raw: str
-    price_resident_kzt: float | None = None
-    price_nonresident_kzt: float | None = None
+    price_resident_kzt: Decimal | None = None
+    price_nonresident_kzt: Decimal | None = None
     currency_original: str = "KZT"
     service_code_source: str | None = None
     
     @field_validator('price_resident_kzt')
     def check_price(cls, v):
-        if v is not None and v <= 0:
+        if v is not None and v <= Decimal('0'):
             raise ValueError("Цена должна быть больше 0")
         return v
         

@@ -1,5 +1,6 @@
 import re
 import typing
+from decimal import Decimal
 from app.parsers.base import BaseParser, ParsedItem, detect_currency
 
 class DoclingParser(BaseParser):
@@ -64,8 +65,9 @@ class DoclingParser(BaseParser):
         # 1. Look for service name column
         for idx, h in enumerate(norm_headers):
             if any(word in h for word in ["наименование", "услуга", "исследование", "название", "описание", "name", "service"]):
-                name_idx = idx
-                break
+                if not any(code_word in h for code_word in ["код", "шифр", "code", "id", "№", "article"]):
+                    name_idx = idx
+                    break
         # Fallback for name: first text column that doesn't look like code or price
         if name_idx == -1 and len(headers) >= 2:
             for idx, h in enumerate(norm_headers):
@@ -116,8 +118,8 @@ class DoclingParser(BaseParser):
             service_code = cells[code_idx] if (code_idx != -1 and code_idx < len(cells)) else ""
             
             # Price resident
-            price_res_val = 0.0
-            threshold = 100 if header_currency == "KZT" else 1.0
+            price_res_val = Decimal('0')
+            threshold = Decimal('100') if header_currency == "KZT" else Decimal('1.0')
             if price_res_idx != -1 and price_res_idx < len(cells):
                 price_res_val = self._clean_price(cells[price_res_idx])
             else:
@@ -131,7 +133,7 @@ class DoclingParser(BaseParser):
                             break
                             
             # Price non-resident
-            price_nonres_val = 0.0
+            price_nonres_val = Decimal('0')
             if price_nonres_idx != -1 and price_nonres_idx < len(cells):
                 price_nonres_val = self._clean_price(cells[price_nonres_idx])
                 
@@ -145,15 +147,15 @@ class DoclingParser(BaseParser):
                 continue
             if not re.search(r'[а-яА-Яa-zA-Z]', service_name):
                 continue
-            if price_res_val <= 0 and price_nonres_val <= 0:
+            if price_res_val <= Decimal('0') and price_nonres_val <= Decimal('0'):
                 continue
                 
             # Attempt to instantiate ParsedItem with non-resident validation
             try:
                 item = ParsedItem(
                     service_name_raw=service_name,
-                    price_resident_kzt=price_res_val if price_res_val > 0 else None,
-                    price_nonresident_kzt=price_nonres_val if price_nonres_val > 0 else None,
+                    price_resident_kzt=price_res_val if price_res_val > Decimal('0') else None,
+                    price_nonresident_kzt=price_nonres_val if price_nonres_val > Decimal('0') else None,
                     currency_original=currency,
                     service_code_source=service_code if service_code else None
                 )
@@ -164,7 +166,7 @@ class DoclingParser(BaseParser):
                 try:
                     item = ParsedItem(
                         service_name_raw=service_name,
-                        price_resident_kzt=price_res_val if price_res_val > 0 else None,
+                        price_resident_kzt=price_res_val if price_res_val > Decimal('0') else None,
                         currency_original=currency,
                         service_code_source=service_code if service_code else None
                     )
@@ -174,13 +176,14 @@ class DoclingParser(BaseParser):
             
         return parsed_items
 
-    def _clean_price(self, price_str: str) -> float:
+    def _clean_price(self, price_str: str) -> Decimal:
         # Extract first numeric sequence, ignore whitespace/currencies
         match = re.search(r'\b([1-9]\d{0,2}(?:\s?\d{3})*(?:[.,]\d{1,2})?)\b', price_str)
         if match:
             try:
-                return float(match.group(1).replace(" ", "").replace(",", "."))
-            except ValueError:
+                val_str = match.group(1).replace(" ", "").replace(",", ".")
+                return Decimal(val_str)
+            except (ValueError, ArithmeticError):
                 pass
-        return 0.0
+        return Decimal('0')
 
