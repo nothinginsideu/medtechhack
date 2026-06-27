@@ -5,6 +5,8 @@ from sqlalchemy.future import select
 from app.db.database import SessionLocal, engine
 from app.models.partner import Partner
 from app.models.service import Service
+from app.models.price_document import PriceDocument
+from app.models.price_item import PriceItem
 from app.models.base import Base
 import os
 

@@ -20,7 +20,7 @@ export default function Header({ selectedCity, setSelectedCity }) {
               <select 
                 value={selectedCity}
                 onChange={(e) => setSelectedCity && setSelectedCity(e.target.value)}
-                className="bg-transparent outline-none border-none cursor-pointer hover:text-[#111827] transition-colors font-medium text-[#111827]"
+                className="bg-transparent outline-none border-none cursor-pointer hover:text-[#111827] font-medium text-[#111827]"
               >
                 <option value="Астана">Астана</option>
                 <option value="Алматы">Алматы</option>
@@ -30,25 +30,25 @@ export default function Header({ selectedCity, setSelectedCity }) {
           )}
         </div>
 
-        <nav className="flex items-center gap-2 bg-[#F9FAFB] p-1 rounded-lg border border-[#E5E7EB]">
+        <nav className="flex items-center gap-2 bg-[#F9FAFB] p-1 border border-[#E5E7EB]">
           <Link
             to="/"
-            className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-2 ${
-              !isAdmin 
-                ? 'bg-white shadow-sm text-[#111827]' 
-                : 'text-[#6B7280] hover:text-[#111827]'
-            }`}
+            className={`px-4 py-1.5 text-sm font-medium flex items-center gap-2 ${
+ !isAdmin 
+ ? 'bg-white text-[#111827]' 
+ : 'text-[#6B7280] hover:text-[#111827]'
+ }`}
           >
             <Search size={16} />
             Поиск клиник
           </Link>
           <Link
             to="/admin"
-            className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-2 ${
-              isAdmin 
-                ? 'bg-white shadow-sm text-[#111827]' 
-                : 'text-[#6B7280] hover:text-[#111827]'
-            }`}
+            className={`px-4 py-1.5 text-sm font-medium flex items-center gap-2 ${
+ isAdmin 
+ ? 'bg-white text-[#111827]' 
+ : 'text-[#6B7280] hover:text-[#111827]'
+ }`}
           >
             <LayoutDashboard size={16} />
             Панель оператора

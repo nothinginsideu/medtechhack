@@ -14,13 +14,31 @@ SERVICE_CACHE = {}
 async def get_service_cache(db: AsyncSession) -> dict:
     global SERVICE_CACHE
     if not SERVICE_CACHE:
-        stmt = select(Service.id, Service.name_ru).where(Service.is_active == True)
+        stmt = select(Service.id, Service.name_ru, Service.synonyms).where(Service.is_active == True)
         result = await db.execute(stmt)
         for row in result.all():
-            SERVICE_CACHE[row[0]] = row[1]
+            svc_id, name, synonyms = row[0], row[1], row[2]
+            SERVICE_CACHE[f"{svc_id}_name"] = name
+            if synonyms and isinstance(synonyms, list):
+                for i, syn in enumerate(synonyms):
+                    if syn:
+                        SERVICE_CACHE[f"{svc_id}_syn_{i}"] = syn
     return SERVICE_CACHE
 
 router = APIRouter()
+
+@router.get("/categories")
+async def get_categories(db: AsyncSession = Depends(get_db)):
+    """Возвращает список уникальных специализаций (категорий) из базы."""
+    stmt = select(Service.specialty).where(Service.specialty != None).distinct()
+    result = await db.execute(stmt)
+    specialties = [s for s in result.scalars().all() if s.strip()]
+    
+    # Map them strictly back to our 4-5 major groups if we want, or just return them directly.
+    # The user asked to remove hardcoded mapping, so we return the raw distinct values, 
+    # but maybe grouped into top-level unique ones.
+    
+    return sorted(list(set(specialties)))
 
 @router.get("/search")
 async def search_services(
@@ -135,82 +153,20 @@ async def search_services(
                 "prices": sorted(prices, key=lambda x: x["price_resident"] if x["price_resident"] else float('inf'))
             })
 
-    # Search matching unlinked or unverified price items
-    price_conditions = []
-    for word in words:
-        price_conditions.append(PriceItem.service_name_raw.ilike(f"%{word}%"))
-
-    price_stmt = (
-        select(PriceItem)
-        .where(
-            and_(
-                or_(
-                    PriceItem.service_id == None,
-                    PriceItem.is_verified == False
-                ),
-                PriceItem.is_active == True,
-                *price_conditions
-            )
-        )
-        .options(
-            joinedload(PriceItem.document),
-            joinedload(PriceItem.partner)
-        )
-        .limit(300)
-    )
-
-    price_result = await db.execute(price_stmt)
-    unlinked_items = price_result.scalars().all()
-
-    unlinked_groups = {}
-    for p_item in unlinked_items:
-        key = p_item.service_name_raw.strip()
-        if not key:
-            continue
-            
-        group_key = key.lower()
-        partner = p_item.partner
-        if not partner:
-            continue
-
-        price_data = {
-            "partner_id": partner.id,
-            "partner_name": partner.name,
-            "partner_address": partner.address,
-            "partner_city": partner.city,
-            "partner_bin": partner.bin,
-            "partner_phone": partner.contact_phone,
-            "price_resident": p_item.price_resident_kzt,
-            "price_nonresident": p_item.price_nonresident_kzt,
-            "price_original": p_item.price_original,
-            "currency_original": p_item.currency_original.value if p_item.currency_original else "KZT",
-            "original_name": p_item.service_name_raw,
-            "date": p_item.effective_date.strftime("%d %b %Y") if p_item.effective_date else None
-        }
-
-        if group_key not in unlinked_groups:
-            unlinked_groups[group_key] = {
-                "service_id": f"unlinked_{p_item.id}",
-                "name": key,
-                "specialty": "Общая",
-                "prices": []
-            }
-        unlinked_groups[group_key]["prices"].append(price_data)
-
-    # Sort prices and merge unlinked groups into final response
-    for group in unlinked_groups.values():
-        group["prices"] = sorted(group["prices"], key=lambda x: x["price_resident"] if x["price_resident"] is not None else float('inf'))
-        response.append(group)
-        
     if not response:
         # Fallback to RapidFuzz
         from rapidfuzz import process, fuzz
         
         cache = await get_service_cache(db)
-        matches = process.extract(q, cache, limit=5, scorer=fuzz.token_set_ratio, score_cutoff=60)
+        cutoff = 60 if len(q) <= 5 else 50
+        
+        def combo_scorer(s1, s2, **kwargs):
+            return max(fuzz.WRatio(s1, s2, **kwargs), fuzz.partial_ratio(s1, s2, **kwargs))
+            
+        matches = process.extract(q, cache, limit=5, scorer=combo_scorer, score_cutoff=cutoff)
         
         if matches:
-            matched_ids = [m[2] for m in matches]
+            matched_ids = list({int(str(m[2]).split('_')[0]) for m in matches})
             
             fallback_stmt = (
                 select(Service)
@@ -374,12 +330,10 @@ async def chat_assistant(
     from app.core.config import settings
     import json
     
+    from fastapi import HTTPException
+
     if not settings.GEMINI_API_KEY:
-        return {
-            "analysis": "Сервис временно недоступен: отсутствует API-ключ ИИ.",
-            "recommendations": ["Пожалуйста, обратитесь к врачу общей практики."],
-            "services": []
-        }
+        raise HTTPException(status_code=503, detail="ИИ-Ассистент временно недоступен: отсутствует API-ключ")
         
     genai.configure(api_key=settings.GEMINI_API_KEY)
     
@@ -416,11 +370,7 @@ async def chat_assistant(
         search_queries = data.get("search_queries", [])
     except Exception as e:
         print(f"Ошибка при работе с Gemini: {e}")
-        return {
-            "analysis": "Произошла ошибка при анализе симптомов ИИ. Попробуйте перефразировать ваш запрос.",
-            "recommendations": ["Рекомендуем проконсультироваться с терапевтом."],
-            "services": []
-        }
+        raise HTTPException(status_code=503, detail="ИИ-Ассистент временно недоступен")
         
     services_found = []
     seen_service_ids = set()

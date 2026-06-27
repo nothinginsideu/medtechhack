@@ -48,12 +48,33 @@ async def process_documents_task(documents_to_process: list):
                 parser = get_parser(file_path, {})
                 parsed_items = await asyncio.to_thread(parser.parse)
                 
-                # Historical USD and RUB rate logic
+                import urllib.request
+                import xml.etree.ElementTree as ET
+                
+                # Default historical fallback logic
                 historic_usd_rates = {2020: 413, 2021: 426, 2022: 460, 2023: 456, 2024: 450, 2025: 480, 2026: 485}
                 historic_rub_rates = {2020: 5.7, 2021: 5.8, 2022: 6.7, 2023: 5.3, 2024: 5.0, 2025: 5.2, 2026: 5.3}
                 year = doc.effective_date.year if doc.effective_date else date.today().year
                 usd_rate = historic_usd_rates.get(year, 480)
                 rub_rate = historic_rub_rates.get(year, 5.2)
+                
+                # Fetch actual rates from National Bank API
+                try:
+                    fdate = doc.effective_date.strftime('%d.%m.%Y') if doc.effective_date else date.today().strftime('%d.%m.%Y')
+                    url = f"https://nationalbank.kz/rss/get_rates.cfm?fdate={fdate}"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        xml_data = response.read()
+                        root = ET.fromstring(xml_data)
+                        for item in root.findall('item'):
+                            title = item.find('title').text
+                            if title == 'USD':
+                                usd_rate = float(item.find('description').text)
+                            elif title == 'RUB':
+                                rub_rate = float(item.find('description').text)
+                    print(f"Loaded National Bank rates for {fdate}: USD={usd_rate}, RUB={rub_rate}")
+                except Exception as e:
+                    print(f"Failed to fetch National Bank API, using fallback rates: {e}")
                 
                 if doc.effective_date and doc.effective_date > date.today():
                     doc.parse_log = (doc.parse_log or "") + f"Предупреждение: дата прайса в будущем ({doc.effective_date}).\n"
@@ -241,13 +262,6 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
     active_clinics = clinics_result.scalar() or 0
     
     # 3. Позиции в очереди
-    unmatched_stmt = select(func.count()).select_from(PriceItem).where(
-        PriceItem.is_verified == False,
-        PriceItem.is_active == True
-    )
-    unmatched_result = await db.execute(unmatched_stmt)
-    in_queue = unmatched_result.scalar() or 0
-    
     # 4. Процент автоматической нормализации
     total_active_stmt = select(func.count()).select_from(PriceItem).where(PriceItem.is_active == True)
     total_active = (await db.execute(total_active_stmt)).scalar() or 0
@@ -258,7 +272,15 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
     )
     verified_active = (await db.execute(verified_active_stmt)).scalar() or 0
     
-    automation_score = int((verified_active / total_active) * 100) if total_active > 0 else 100
+    real_score = int((verified_active / total_active) * 100) if total_active > 0 else 100
+    automation_score = real_score
+    
+    # Adjust in_queue to match the actual DB count to prevent bouncing issues
+    unmatched_stmt = select(func.count()).select_from(PriceItem).where(
+        PriceItem.is_verified == False,
+        PriceItem.is_active == True
+    )
+    in_queue = (await db.execute(unmatched_stmt)).scalar() or 0
     
     # 5. Количество документов в обработке
     processing_stmt = select(func.count()).select_from(PriceDocument).where(PriceDocument.parse_status == ParseStatus.processing)
@@ -336,7 +358,8 @@ async def get_unmatched_items(
             )
         ).options(
             joinedload(PriceItem.partner),
-            joinedload(PriceItem.document)
+            joinedload(PriceItem.document),
+            joinedload(PriceItem.service)
         ).order_by(PriceItem.match_score.desc()).limit(100)
     else: # anomaly / unmatched
         stmt = select(PriceItem).where(
@@ -351,7 +374,8 @@ async def get_unmatched_items(
             )
         ).options(
             joinedload(PriceItem.partner),
-            joinedload(PriceItem.document)
+            joinedload(PriceItem.document),
+            joinedload(PriceItem.service)
         ).order_by(PriceItem.match_score.desc()).limit(100)
 
     result = await db.execute(stmt)
@@ -435,6 +459,7 @@ async def get_unmatched_items(
             "id": item.id,
             "raw_name": item.service_name_raw,
             "suggested_service_id": item.service_id,
+            "suggested_service_name": item.service.name_ru if item.service else None,
             "confidence": item.match_score,
             "old_price": old_price,
             "new_price": new_price,
@@ -459,6 +484,7 @@ async def get_unmatched_items(
 async def match_item(
     item_id: int,
     service_id: Optional[int] = None,
+    service_name: Optional[str] = None,
     price: Optional[float] = None,
     price_nonresident: Optional[float] = None,
     raw_name: str = Query(...),
@@ -474,6 +500,14 @@ async def match_item(
     if not item:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
         
+    
+    if service_name and not service_id:
+        from app.models.service import Service
+        svc_result = await db.execute(select(Service).where(Service.name_ru.ilike(f"%{service_name}%")))
+        found_svc = svc_result.scalars().first()
+        if found_svc:
+            service_id = found_svc.id
+            
     # Архивация старой версии (по ТЗ: старая версия архивируется, не удаляется)
     item.is_active = False
     
@@ -574,3 +608,63 @@ async def get_auto_normalized_items(db: AsyncSession = Depends(get_db)):
             "effective_date": item.effective_date.strftime("%Y-%m-%d") if item.effective_date else None
         })
     return response
+
+@router.get("/export")
+async def export_price_data(db: AsyncSession = Depends(get_db)):
+    from fastapi.responses import StreamingResponse
+    import csv
+    import io
+    from sqlalchemy.orm import joinedload
+    
+    async def iter_csv():
+        output = io.StringIO()
+        writer = csv.writer(output, delimiter=';')
+        writer.writerow([
+            "Клиника", 
+            "Исходное название", 
+            "Сопоставленная услуга", 
+            "Цена (Резидент, KZT)", 
+            "Цена (Нерезидент, KZT)", 
+            "Оригинальная цена", 
+            "Валюта", 
+            "Статус", 
+            "Дата"
+        ])
+        yield output.getvalue().encode('utf-8-sig')
+        output.seek(0)
+        output.truncate(0)
+        
+        stmt = select(PriceItem).options(
+            joinedload(PriceItem.partner),
+            joinedload(PriceItem.service)
+        ).where(PriceItem.is_active == True)
+        
+        # In async context, execute and then fetchall or stream
+        result = await db.execute(stmt)
+        items = result.scalars().all()
+        
+        for row in items:
+            status_text = "Верифицировано" if row.is_verified else "Ожидает"
+            mapped_service = row.service.name_ru if row.service else ""
+            partner_name = row.partner.name if row.partner else ""
+            
+            writer.writerow([
+                partner_name,
+                row.service_name_raw,
+                mapped_service,
+                str(row.price_resident_kzt or 0),
+                str(row.price_nonresident_kzt or 0),
+                str(row.price_original or ""),
+                row.currency_original.value if row.currency_original else "",
+                status_text,
+                str(row.effective_date or "")
+            ])
+            yield output.getvalue().encode('utf-8-sig')
+            output.seek(0)
+            output.truncate(0)
+            
+    return StreamingResponse(
+        iter_csv(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=medpartners_export.csv"}
+    )

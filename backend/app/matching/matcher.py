@@ -52,6 +52,11 @@ class Matcher:
         best_index = -1
         
         import rapidfuzz
+        import re
+        
+        stop_words = {'терапия', 'прием', 'исследование', 'анализ', 'услуга', 'консультация', 'осмотр', 'процедура', 'диагностика', 'лечение'}
+        text_words = set([w for w in re.findall(r'[a-zа-я0-9]+', norm_text) if w not in stop_words])
+        
         for i, norm_svc in enumerate(self.normalized_services):
             # token_set_ratio checks word intersection
             set_score = rapidfuzz.fuzz.token_set_ratio(norm_text, norm_svc)
@@ -60,6 +65,11 @@ class Matcher:
             
             # Weighted combination for high accuracy and low false positives
             score = set_score * 0.6 + sort_score * 0.4
+            
+            # Penalty logic: if meaningful non-stop words have zero intersection, penalize heavily.
+            svc_words = set([w for w in re.findall(r'[a-zа-я0-9]+', norm_svc) if w not in stop_words])
+            if text_words and svc_words and not text_words.intersection(svc_words):
+                score *= 0.5
             
             if score > best_score:
                 best_score = score
