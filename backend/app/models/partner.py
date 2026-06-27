@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, JSON, Boolean
+from sqlalchemy import Column, Integer, String, JSON, Boolean, DateTime
 from sqlalchemy.orm import relationship
 from app.models.base import Base
 
@@ -13,6 +13,8 @@ class Partner(Base):
     contact_email = Column(String, nullable=True)
     contact_phone = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
+    is_verified = Column(Boolean, default=False, nullable=False)
+    verification_date = Column(DateTime, nullable=True)
     config = Column(JSON, nullable=True)  # Конфиг для парсинга прайсов
 
     price_documents = relationship("PriceDocument", back_populates="partner", cascade="all, delete-orphan")

@@ -16,11 +16,15 @@ export default function AdminDashboard() {
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState('fast_track');
+  const [queueCounts, setQueueCounts] = useState({ fast_track: 0, anomaly: 0 });
+  const [lastProcessingCount, setLastProcessingCount] = useState(0);
+  const [showSuccessToast, setShowSuccessToast] = useState(false);
   
   const fileInputRef = useRef(null);
 
   useEffect(() => {
-    fetchAnomalies();
+    fetchAnomalies(activeTab);
     fetchStats();
 
     // Poll stats every 5 seconds
@@ -30,32 +34,47 @@ export default function AdminDashboard() {
 
     // Poll anomaly queue every 15 seconds
     const anomalyInterval = setInterval(() => {
-      fetchAnomalies();
+      fetchAnomalies(activeTab);
     }, 15000);
 
     return () => {
       clearInterval(statsInterval);
       clearInterval(anomalyInterval);
     };
-  }, []);
+  }, [activeTab]);
 
   const fetchStats = async () => {
     try {
       const response = await axios.get('http://localhost:8000/api/v1/admin/stats');
-      setStats(response.data);
+      const newStats = response.data;
+      setStats(newStats);
       setLastUpdated(new Date());
       setIsLive(true);
+      
+      const currentProcessing = newStats.processingCount || 0;
+      setLastProcessingCount(prev => {
+        if (prev > 0 && currentProcessing === 0) {
+          setShowSuccessToast(true);
+          setTimeout(() => setShowSuccessToast(false), 8000);
+          fetchAnomalies(activeTab);
+        }
+        return currentProcessing;
+      });
     } catch (error) {
       console.error("Ошибка при загрузке статистики:", error);
       setIsLive(false);
     }
   };
 
-  const fetchAnomalies = async () => {
+  const fetchAnomalies = async (tab = activeTab) => {
     setLoading(true);
     try {
-      const response = await axios.get('http://localhost:8000/api/v1/admin/unmatched');
-      setAnomalies(response.data);
+      const response = await axios.get(`http://localhost:8000/api/v1/admin/unmatched?queue=${tab}`);
+      setAnomalies(response.data.items || []);
+      setQueueCounts({
+        fast_track: response.data.fast_track_count || 0,
+        anomaly: response.data.anomaly_count || 0
+      });
     } catch (error) {
       console.error("Ошибка при загрузке аномалий:", error);
     } finally {
@@ -144,12 +163,36 @@ export default function AdminDashboard() {
     }
   };
 
+  const displayedItems = anomalies;
+
   return (
     <div className="space-y-8">
       <div>
         <h1 className="text-3xl font-bold text-[#111827]">Панель оператора</h1>
         <p className="text-[#6B7280] mt-1">Аналитика, верификация парсинга и управление справочником</p>
       </div>
+
+      {showSuccessToast && (
+        <div className="bg-[#E6F4EA] border border-[#137333] text-[#137333] px-4 py-3 rounded-md flex items-center justify-between shadow-sm transition-all duration-300">
+          <div className="flex items-center gap-2 font-medium">
+            <CheckCircle2 className="w-5 h-5 text-[#10B981]" />
+            <span>Все файлы успешно обработаны и сопоставлены! Очередь обновлена.</span>
+          </div>
+          <button 
+            onClick={() => setShowSuccessToast(false)} 
+            className="text-[#137333] hover:text-[#0b4d20] font-bold text-sm cursor-pointer ml-4"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+      
+      {stats.processingCount > 0 && (
+        <div className="bg-[#E8F0FE] border border-[#1A73E8] text-[#1A73E8] px-4 py-3 rounded-md flex items-center gap-3 shadow-sm animate-pulse transition-all duration-300">
+          <Loader2 className="w-5 h-5 animate-spin text-[#1A73E8]" />
+          <span className="font-medium">Идет фоновое распознавание и сопоставление файлов... Осталось: <span className="font-bold">{stats.processingCount}</span></span>
+        </div>
+      )}
 
       {/* Upload Zone */}
       <div className="bg-white border border-[#E5E7EB] rounded-md p-8 flex flex-col items-center justify-center relative shadow-sm">
@@ -210,7 +253,7 @@ export default function AdminDashboard() {
           )}
         </div>
         <button
-          onClick={() => { fetchStats(); fetchAnomalies(); }}
+          onClick={() => { fetchStats(); fetchAnomalies(activeTab); }}
           className="flex items-center gap-1.5 text-xs text-[#4B5563] hover:text-[#111827] transition-colors cursor-pointer"
           title="Обновить сейчас"
         >
@@ -266,18 +309,55 @@ export default function AdminDashboard() {
       <div>
         <h2 className="text-lg font-bold text-[#111827] mb-4">Очередь верификации</h2>
         
-        {anomalies.length === 0 ? (
+        {/* Tab Buttons */}
+        <div className="flex border-b border-[#E5E7EB] mb-6 gap-6">
+          <button
+            onClick={() => setActiveTab('fast_track')}
+            className={`pb-3 text-sm font-semibold transition-colors relative cursor-pointer flex items-center ${
+              activeTab === 'fast_track' ? 'text-[#059669]' : 'text-[#6B7280] hover:text-[#111827]'
+            }`}
+          >
+            Доверяемые услуги (Зеленая очередь)
+            <span className="ml-2 bg-[#E6F4EA] text-[#059669] text-xs px-2 py-0.5 rounded-full font-semibold">
+              {queueCounts.fast_track}
+            </span>
+            {activeTab === 'fast_track' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#059669]" />
+            )}
+          </button>
+          
+          <button
+            onClick={() => setActiveTab('anomaly')}
+            className={`pb-3 text-sm font-semibold transition-colors relative cursor-pointer flex items-center ${
+              activeTab === 'anomaly' ? 'text-[#DC2626]' : 'text-[#6B7280] hover:text-[#111827]'
+            }`}
+          >
+            Сомнительные / Аномалии
+            <span className="ml-2 bg-[#FCE8E6] text-[#C5221F] text-xs px-2 py-0.5 rounded-full font-semibold">
+              {queueCounts.anomaly}
+            </span>
+            {activeTab === 'anomaly' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#DC2626]" />
+            )}
+          </button>
+        </div>
+
+        {displayedItems.length === 0 ? (
           <div className="text-center py-12 bg-white border border-[#E5E7EB] rounded-md">
             <CheckCircle2 className="mx-auto h-12 w-12 text-[#D1D5DB] mb-3" />
-            <h3 className="text-sm font-medium text-[#374151]">Очередь верификации пуста</h3>
-            <p className="text-sm text-[#6B7280] mt-1">Загрузите ZIP-архив клиник для начала обработки.</p>
+            <h3 className="text-sm font-medium text-[#374151]">Очередь пуста</h3>
+            <p className="text-sm text-[#6B7280] mt-1">
+              {activeTab === 'fast_track' 
+                ? 'Нет доверяемых услуг с высокой уверенностью сопоставления.' 
+                : 'Нет сомнительных услуг или аномалий.'}
+            </p>
           </div>
         ) : (
           <div className="space-y-4">
-            {anomalies.map((item) => (
+            {displayedItems.map((item) => (
               <div 
-                key={item.id} 
-                className={`border rounded-md overflow-hidden shadow-sm ${item.status === 'anomaly' ? 'border-[#FBBF24] bg-[#FEFCE8]' : 'border-[#E5E7EB] bg-white'}`}
+                key={item.id}
+                className={`border rounded-md overflow-hidden shadow-sm ${item.status === 'anomaly' ? 'border-[#FBBF24] bg-[#FEFCE8]' : item.status === 'fast_track' ? 'border-[#10B981] bg-[#F0FDF4]' : 'border-[#E5E7EB] bg-white'}`}
               >
                 {/* Clinic & File Header Info */}
                 <div className="bg-[#F9FAFB] border-b border-[#E5E7EB] px-5 py-2 flex justify-between items-center text-xs text-[#4B5563]">
@@ -288,10 +368,15 @@ export default function AdminDashboard() {
                     <span className="text-[#9CA3AF]">Файл:</span> {item.file_name || 'Неизвестный файл'}
                   </div>
                 </div>
-                {item.status === 'anomaly' && (
-                  <div className="bg-[#FEFCE8] border-b border-[#FBBF24] px-5 py-2 text-xs text-[#B45309] font-medium flex items-center gap-2">
-                    <AlertTriangle size={14} />
-                    {item.note || 'Требуется ручная проверка'}
+                
+                {item.note && (
+                  <div className={`border-b px-5 py-2 text-xs font-medium flex items-center gap-2 ${
+                    item.status === 'anomaly' ? 'bg-[#FEFCE8] border-[#FBBF24] text-[#B45309]' : 
+                    item.status === 'fast_track' ? 'bg-[#ECFDF5] border-[#10B981] text-[#047857]' : 
+                    'bg-[#F3F4F6] border-[#D1D5DB] text-[#4B5563]'
+                  }`}>
+                    {item.status === 'fast_track' ? <CheckCircle2 size={14} className="text-[#10B981]" /> : <AlertTriangle size={14} className="text-[#FBBF24]" />}
+                    {item.note}
                   </div>
                 )}
                 
@@ -309,6 +394,13 @@ export default function AdminDashboard() {
                       {item.old_price && (
                         <div className="text-[#6B7280] mb-2">Старая цена (Рез): <span className="line-through">{item.old_price} ₸</span></div>
                       )}
+                      
+                      {item.price_original !== undefined && item.price_original !== null && (
+                        <div className="text-xs text-[#6B7280] mb-2 bg-[#F3F4F6] px-2 py-1 rounded w-fit">
+                          Цена в файле (Релиз): <span className="font-semibold">{item.price_original.toLocaleString('ru-RU')} {item.currency_original || 'KZT'}</span>
+                        </div>
+                      )}
+
                       <div className="flex items-center gap-2">
                         <span className="w-24 text-[#6B7280]">Резидент:</span>
                         <div className="text-[#111827] font-semibold flex items-center">
@@ -316,7 +408,7 @@ export default function AdminDashboard() {
                             type="number" 
                             value={item.new_price} 
                             onChange={e => handleRowChange(item.id, 'new_price', e.target.value)}
-                            className="border border-[#D1D5DB] rounded px-2 py-1 w-24 text-sm mr-2 focus:ring-[#2563EB] focus:outline-none"
+                            className="border border-[#D1D5DB] rounded px-2 py-1 w-36 text-sm mr-2 focus:ring-[#2563EB] focus:outline-none"
                           /> ₸
                         </div>
                       </div>
@@ -328,14 +420,27 @@ export default function AdminDashboard() {
                             type="number" 
                             value={item.new_price_nonresident} 
                             onChange={e => handleRowChange(item.id, 'new_price_nonresident', e.target.value)}
-                            className="border border-[#D1D5DB] rounded px-2 py-1 w-24 text-sm mr-2 focus:ring-[#2563EB] focus:outline-none"
+                            className="border border-[#D1D5DB] rounded px-2 py-1 w-36 text-sm mr-2 focus:ring-[#2563EB] focus:outline-none"
                           /> ₸
                         </div>
                       </div>
 
-                      {item.diff && (
-                        <div className={`font-bold text-xs ${item.status === 'anomaly' ? 'text-[#DC2626]' : 'text-[#6B7280]'}`}>
-                          ({item.diff})
+                      {item.old_price && (
+                        <div className={`font-bold text-xs ${
+                          item.status === 'anomaly' || 
+                          Math.abs((parseFloat(item.new_price) - parseFloat(item.old_price)) / parseFloat(item.old_price)) > 0.5 
+                            ? 'text-[#DC2626]' 
+                            : 'text-[#6B7280]'
+                        }`}>
+                          ({(() => {
+                            const oldP = parseFloat(item.old_price);
+                            const newP = parseFloat(item.new_price);
+                            if (isNaN(oldP) || isNaN(newP) || oldP === 0) return '0%';
+                            const diff = newP - oldP;
+                            const diffPct = (diff / oldP) * 100;
+                            const sign = diff > 0 ? "+" : "";
+                            return `${sign}${Math.round(diffPct)}%`;
+                          })()})
                         </div>
                       )}
                     </div>

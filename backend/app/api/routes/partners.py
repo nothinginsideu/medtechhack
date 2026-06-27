@@ -76,13 +76,51 @@ async def get_partner_services(partner_id: int, db: AsyncSession = Depends(get_d
             "date": p.effective_date.strftime("%d %b %Y") if p.effective_date else None
         })
         
+    # Find the maximum date among active services
+    effective_date_val = None
+    if prices:
+        valid_dates = [p.effective_date for p in prices if p.effective_date]
+        if valid_dates:
+            effective_date_val = max(valid_dates).strftime("%Y-%m-%d")
+
     return {
         "partner": {
             "id": partner.id,
             "name": partner.name,
             "city": partner.city,
             "address": partner.address,
-            "bin": partner.bin
+            "bin": partner.bin,
+            "is_verified": partner.is_verified,
+            "verification_date": partner.verification_date.strftime("%Y-%m-%d %H:%M:%S") if partner.verification_date else None,
+            "effective_date": effective_date_val
         },
         "services": price_list
+    }
+
+@router.post("/{partner_id}/verify")
+async def verify_partner(partner_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Ручная верификация клиники оператором.
+    """
+    from datetime import datetime
+    from fastapi import HTTPException
+    
+    stmt = select(Partner).where(Partner.id == partner_id)
+    result = await db.execute(stmt)
+    partner = result.scalars().first()
+    
+    if not partner:
+        raise HTTPException(status_code=404, detail="Клиника не найдена")
+        
+    partner.is_verified = True
+    partner.verification_date = datetime.now()
+    
+    await db.commit()
+    await db.refresh(partner)
+    
+    return {
+        "status": "ok",
+        "message": f"Клиника '{partner.name}' успешно верифицирована",
+        "is_verified": partner.is_verified,
+        "verification_date": partner.verification_date.strftime("%Y-%m-%d %H:%M:%S")
     }

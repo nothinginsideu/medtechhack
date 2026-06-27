@@ -393,9 +393,9 @@ export default function ClientHome({ selectedCity }) {
                                 <div className="text-base font-bold text-[#111827]">
                                   {displayPrice ? `${Number(displayPrice).toLocaleString('ru-RU')} ₸` : 'По запросу'}
                                 </div>
-                                {hasForeignCurrency && (
+                                {priceItem.price_original !== undefined && priceItem.price_original !== null && (
                                   <div className="text-[10px] text-[#9CA3AF]">
-                                    (~ {Number(priceItem.price_original).toLocaleString('ru-RU')} {priceItem.currency_original})
+                                    Исходная: {Number(priceItem.price_original).toLocaleString('ru-RU')} {priceItem.currency_original || 'KZT'}
                                   </div>
                                 )}
                               </div>
@@ -473,7 +473,7 @@ export default function ClientHome({ selectedCity }) {
                         <td className="px-4 py-2 text-[#111827]">{p.price_resident} ₸</td>
                         <td className="px-4 py-2 text-[#6B7280]">{p.price_nonresident} ₸</td>
                         <td className="px-4 py-2 text-[#9CA3AF] text-xs">
-                          {p.currency_original !== 'KZT' ? `(~ ${p.price_original} ${p.currency_original})` : '-'}
+                          {p.price_original !== undefined && p.price_original !== null ? `${Number(p.price_original).toLocaleString('ru-RU')} ${p.currency_original || 'KZT'}` : '-'}
                         </td>
                       </tr>
                     ))}

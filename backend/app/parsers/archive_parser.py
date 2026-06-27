@@ -23,13 +23,33 @@ class ArchiveProcessor:
 
     def _extract_date_from_filename(self, filename: str) -> date:
         """
-        Извлекает год из имени файла (например, '...прайс 2026.pdf').
-        Если год не найден, возвращает текущую дату.
+        Извлекает дату вступления из имени файла (ДД.ММ.ГГГГ, ГГГГ-ММ-ДД или просто ГГГГ).
+        Если дата не найдена, возвращает текущую дату.
         """
-        match = re.search(r'\b(20\d{2})\b', filename)
-        if match:
-            year = int(match.group(1))
+        # 1. Поиск DD.MM.YYYY
+        match_full = re.search(r'\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b', filename)
+        if match_full:
+            d, m, y = map(int, match_full.groups())
+            try:
+                return date(y, m, d)
+            except ValueError:
+                pass
+                
+        # 2. Поиск YYYY-MM-DD
+        match_iso = re.search(r'\b(20\d{2})[./-](\d{1,2})[./-](\d{1,2})\b', filename)
+        if match_iso:
+            y, m, d = map(int, match_iso.groups())
+            try:
+                return date(y, m, d)
+            except ValueError:
+                pass
+
+        # 3. Поиск просто года
+        match_year = re.search(r'\b(20\d{2})\b', filename)
+        if match_year:
+            year = int(match_year.group(1))
             return date(year, 1, 1)
+            
         return date.today()
 
     def _find_or_create_partner_by_filename(self, filename: str) -> Partner:

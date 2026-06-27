@@ -9,10 +9,8 @@ from app.models.base import Base
 import os
 
 async def seed_data():
-    async with engine.begin() as conn:
-        # Для хакатона просто пересоздаем схему
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.run_sync(Base.metadata.create_all)
+    # Для хакатона больше не пересоздаем схему автоматически, используем миграции
+    pass
 
     async with SessionLocal() as session:
         # 1. Seed Partners
