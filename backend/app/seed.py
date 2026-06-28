@@ -16,25 +16,25 @@ async def seed_data():
 
     async with SessionLocal() as session:
         # 1. Seed Partners
-        partners_file = "/app/data/partners.json"
-        if os.path.exists(partners_file):
-            with open(partners_file, "r", encoding="utf-8") as f:
-                partners_data = json.load(f)
-            
-            for p_data in partners_data:
-                # Check if exists
-                stmt = select(Partner).where(Partner.name == p_data["name"])
-                result = await session.execute(stmt)
-                if not result.scalars().first():
-                    new_partner = Partner(
-                        name=p_data["name"],
-                        city=p_data["city"],
-                        address=p_data["address"],
-                        contact_phone=p_data.get("phone", None),
-                        config=p_data.get("config", {})
-                    )
-                    session.add(new_partner)
-            print("Partners seeded.")
+        # Для рабочего продукта убираем создание тестовых демо-клиник "Клиника А" и "Клиника Б"
+        # partners_file = "/app/data/partners.json"
+        # if os.path.exists(partners_file):
+        #     with open(partners_file, "r", encoding="utf-8") as f:
+        #         partners_data = json.load(f)
+        #     
+        #     for p_data in partners_data:
+        #         stmt = select(Partner).where(Partner.name == p_data["name"])
+        #         result = await session.execute(stmt)
+        #         if not result.scalars().first():
+        #             new_partner = Partner(
+        #                 name=p_data["name"],
+        #                 city=p_data["city"],
+        #                 address=p_data["address"],
+        #                 contact_phone=p_data.get("phone", None),
+        #                 config=p_data.get("config", {})
+        #             )
+        #             session.add(new_partner)
+        #     print("Partners seeded.")
         
         # 2. Seed Services from Справочник
         services_file = "/app/data/Справочник услуг.xlsx"

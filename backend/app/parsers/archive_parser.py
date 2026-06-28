@@ -2,6 +2,7 @@ import zipfile
 import io
 import os
 import re
+import uuid
 from datetime import date
 from rapidfuzz import process
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +11,8 @@ from sqlalchemy.future import select
 from app.models.partner import Partner
 from app.models.price_document import PriceDocument, FileFormat, ParseStatus
 from app.parsers import get_parser
+
+UPLOAD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/uploads"))
 
 class ArchiveProcessor:
     def __init__(self, db: AsyncSession):
@@ -52,7 +55,18 @@ class ArchiveProcessor:
             
         return date.today()
 
-    def _find_or_create_partner_by_filename(self, filename: str) -> Partner:
+    def _partner_name_from_filename(self, filename: str) -> str:
+        base_name = os.path.splitext(os.path.basename(filename))[0]
+        clinic_match = re.search(r'(клиника\s*\d+)', base_name, re.IGNORECASE)
+        if clinic_match:
+            return re.sub(r'\s+', ' ', clinic_match.group(1)).strip().title()
+
+        cleaned = re.sub(r'\b(прайс|price|лист|год|года|утверждено|от|архив)\b', ' ', base_name, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b20\d{2}\b', ' ', cleaned)
+        cleaned = cleaned.replace('_', ' ').replace('-', ' ')
+        return re.sub(r'\s+', ' ', cleaned).strip() or base_name
+
+    async def _find_or_create_partner_by_filename(self, filename: str) -> Partner:
         """
         Определяет партнера по имени файла. Если не найден — ищет по БИН в тексте (заглушка)
         или создает нового динамически.
@@ -61,14 +75,14 @@ class ArchiveProcessor:
         bin_match = re.search(r'\b(\d{12})\b', filename)
         extracted_bin = bin_match.group(1) if bin_match else None
 
-        base_name = os.path.splitext(os.path.basename(filename))[0]
+        partner_name = self._partner_name_from_filename(filename)
 
         if self.partners:
             partner_names = {p.id: p.name for p in self.partners}
             
             # Сначала пытаемся по названию (требуем практически 100% совпадения, чтобы Клиника 1 и Клиника 2 не сливались)
-            best_match = process.extractOne(base_name, partner_names)
-            if best_match and best_match[1] > 98: 
+            best_match = process.extractOne(partner_name, partner_names)
+            if best_match and best_match[1] >= 90: 
                 partner_id = best_match[2]
                 return next((p for p in self.partners if p.id == partner_id), None)
                 
@@ -80,15 +94,21 @@ class ArchiveProcessor:
         
         # Если партнер не найден, создаем нового
         new_partner = Partner(
-            name=base_name.replace('_', ' ').replace('-', ' ').strip(),
+            name=partner_name,
             bin=extracted_bin,
             city="Астана", # Дефолт, если не удалось определить
             is_active=True
         )
         self.db.add(new_partner)
-        # Flush is required to get the new partner ID synchronously within the block, but we are inside async.
-        # We will commit it inside process_zip
+        await self.db.flush()
+        await self.db.refresh(new_partner)
+        self.partners.append(new_partner)
         return new_partner
+
+    def _safe_storage_path(self, filename: str) -> str:
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        safe_name = re.sub(r'[^\w.\- а-яА-ЯёЁ]', '_', filename).strip(" ._")
+        return os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{safe_name}")
 
     def _determine_format(self, filename: str) -> FileFormat:
         ext = os.path.splitext(filename)[1].lower()
@@ -130,13 +150,7 @@ class ArchiveProcessor:
                 if not file_format:
                     continue
 
-                partner = self._find_or_create_partner_by_filename(filename)
-                
-                # Сохраняем нового партнера сразу, чтобы получить его ID для PriceDocument
-                if not partner.id:
-                    await self.db.commit()
-                    await self.db.refresh(partner)
-                    self.partners.append(partner)
+                partner = await self._find_or_create_partner_by_filename(filename)
                     
                 if not partner:
                     print(f"Партнер не найден и не удалось создать: {filename}")
@@ -144,11 +158,9 @@ class ArchiveProcessor:
 
                 effective_date = self._extract_date_from_filename(filename)
 
-                temp_dir = "/tmp/medpartners_uploads"
-                os.makedirs(temp_dir, exist_ok=True)
-                temp_path = os.path.join(temp_dir, filename)
+                stored_path = self._safe_storage_path(filename)
                 
-                with open(temp_path, "wb") as f:
+                with open(stored_path, "wb") as f:
                     f.write(archive.read(file_info.filename))
 
                 doc = PriceDocument(
@@ -156,7 +168,8 @@ class ArchiveProcessor:
                     file_name=filename,
                     file_format=file_format,
                     effective_date=effective_date,
-                    parse_status=ParseStatus.pending
+                    parse_status=ParseStatus.pending,
+                    parse_log=f"Исходный файл сохранен: {stored_path}\n"
                 )
                 self.db.add(doc)
                 await self.db.commit()
@@ -164,7 +177,7 @@ class ArchiveProcessor:
                 
                 documents_to_process.append({
                     "doc_id": doc.id,
-                    "file_path": temp_path
+                    "file_path": stored_path
                 })
                 
         return documents_to_process

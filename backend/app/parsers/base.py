@@ -2,6 +2,7 @@ import abc
 import typing
 from pydantic import BaseModel, Field, field_validator
 from decimal import Decimal
+import re
 
 class ParsedItem(BaseModel):
     service_name_raw: str
@@ -44,6 +45,7 @@ class BaseParser(abc.ABC):
     def __init__(self, file_path: str, config: dict):
         self.file_path = file_path
         self.config = config
+        self.raw_content = ""
 
     @abc.abstractmethod
     def parse(self) -> typing.List[ParsedItem]:
@@ -51,6 +53,24 @@ class BaseParser(abc.ABC):
         Парсит файл и возвращает список найденных услуг с ценами.
         """
         pass
+
+
+PRICE_PATTERN = re.compile(r'(?:^|\s|>)([1-9]\d{0,2}(?:[\s\u00a0]?\d{3})*(?:[.,]\d{1,2})?)(?=\s|$|₸|тг|kzt|руб|rub|usd|\$|€|\.)', re.IGNORECASE)
+
+def parse_price(value: typing.Any, currency: str = "KZT") -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        parsed = Decimal(str(value))
+    else:
+        text = str(value).strip()
+        match = PRICE_PATTERN.search(text)
+        if not match:
+            return None
+        parsed = Decimal(match.group(1).replace(" ", "").replace("\u00a0", "").replace(",", "."))
+
+    threshold = Decimal("100") if currency == "KZT" else Decimal("1")
+    return parsed if parsed >= threshold else None
 
 
 def extract_date_from_file(file_path: str) -> typing.Any:

@@ -17,16 +17,12 @@ class HybridParser(BaseParser):
             # First try the lightweight parser
             primary_parser = self.primary_parser_class(self.file_path, self.config)
             items = primary_parser.parse()
-            
-            # If we extracted some items, assume it worked well enough
-            if len(items) > 5:
-                return items
-        except Exception:
-            pass
-            
-        # Fallback to the heavy parser
-        fallback_parser = DoclingParser(self.file_path, self.config)
-        return fallback_parser.parse()
+            self.raw_content = getattr(primary_parser, "raw_content", "")
+            return items
+        except Exception as e:
+            print(f"Error in primary parser: {e}")
+            self.raw_content = ""
+            return []
 
 def get_parser(file_path: str, config: dict):
     ext = os.path.splitext(file_path)[1].lower()

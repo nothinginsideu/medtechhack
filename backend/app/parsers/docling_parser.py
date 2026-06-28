@@ -3,13 +3,31 @@ import typing
 from decimal import Decimal
 from app.parsers.base import BaseParser, ParsedItem, detect_currency
 
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.base_models import InputFormat
+
+# Global converter instance to avoid reloading weights for every document
+_docling_converter = None
+
+def get_converter():
+    global _docling_converter
+    if _docling_converter is None:
+        pipeline_options = PdfPipelineOptions()
+        pipeline_options.do_ocr = False
+        _docling_converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+    return _docling_converter
+
 class DoclingParser(BaseParser):
     def parse(self) -> typing.List[ParsedItem]:
-        from docling.document_converter import DocumentConverter
-        
-        converter = DocumentConverter()
+        converter = get_converter()
         result = converter.convert(self.file_path)
         markdown_content = result.document.export_to_markdown()
+        self.raw_content = markdown_content
         
         items = []
         lines = markdown_content.split("\n")
@@ -128,6 +146,9 @@ class DoclingParser(BaseParser):
                     if idx != name_idx and idx != code_idx:
                         val = self._clean_price(cell)
                         if val >= threshold:
+                            # Protection against row numbers in the first column
+                            if header_currency == "KZT" and val < Decimal('1500') and idx == 0:
+                                continue
                             price_res_val = val
                             price_res_idx = idx
                             break
@@ -178,7 +199,7 @@ class DoclingParser(BaseParser):
 
     def _clean_price(self, price_str: str) -> Decimal:
         # Extract first numeric sequence, ignore whitespace/currencies
-        match = re.search(r'\b([1-9]\d{0,2}(?:\s?\d{3})*(?:[.,]\d{1,2})?)\b', price_str)
+        match = re.search(r'(?:^|\s|>)([1-9]\d{0,2}(?:[\s\u00a0]?\d{3})*(?:[.,]\d{1,2})?)(?=\s|$|₸|тг|kzt|руб|rub|usd|\$|€|\.)', price_str, re.IGNORECASE)
         if match:
             try:
                 val_str = match.group(1).replace(" ", "").replace(",", ".")
@@ -186,4 +207,3 @@ class DoclingParser(BaseParser):
             except (ValueError, ArithmeticError):
                 pass
         return Decimal('0')
-
