@@ -8,6 +8,8 @@ export default function AdminDashboard() {
   const [stats, setStats] = useState({
     processed: 0,
     automationScore: 0,
+    normalizedItems: 0,
+    totalItems: 0,
     inQueue: 0,
     activeClinics: 0
   });
@@ -19,32 +21,28 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('fast_track');
   const [queueCounts, setQueueCounts] = useState({ fast_track: 0, anomaly: 0 });
-  const [lastProcessingCount, setLastProcessingCount] = useState(0);
+  const [, setLastProcessingCount] = useState(0);
   const [showSuccessToast, setShowSuccessToast] = useState(false);
   
   const fileInputRef = useRef(null);
 
-  useEffect(() => {
-    fetchAnomalies(activeTab);
-    fetchStats();
-
-    // Poll stats every 5 seconds
-    const statsInterval = setInterval(() => {
-      fetchStats();
-    }, 5000);
-
-    // Poll anomaly queue every 10 seconds
-    const anomalyInterval = setInterval(() => {
-      fetchAnomalies(activeTab);
-    }, 10000);
-
-    return () => {
-      clearInterval(statsInterval);
-      clearInterval(anomalyInterval);
-    };
+  const fetchAnomalies = useCallback(async (tab = activeTab) => {
+    setLoading(true);
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/v1/admin/unmatched?queue=${tab}`);
+      setAnomalies(response.data.items || []);
+      setQueueCounts({
+        fast_track: response.data.fast_track_count || 0,
+        anomaly: response.data.anomaly_count || 0
+      });
+    } catch (error) {
+      console.error("Ошибка при загрузке аномалий:", error);
+    } finally {
+      setLoading(false);
+    }
   }, [activeTab]);
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
       const response = await axios.get(`${API_BASE_URL}/api/v1/admin/stats`);
       const newStats = response.data;
@@ -65,23 +63,20 @@ export default function AdminDashboard() {
       console.error("Ошибка при загрузке статистики:", error);
       setIsLive(false);
     }
-  };
+  }, [activeTab, fetchAnomalies]);
 
-  const fetchAnomalies = async (tab = activeTab) => {
-    setLoading(true);
-    try {
-      const response = await axios.get(`${API_BASE_URL}/api/v1/admin/unmatched?queue=${tab}`);
-      setAnomalies(response.data.items || []);
-      setQueueCounts({
-        fast_track: response.data.fast_track_count || 0,
-        anomaly: response.data.anomaly_count || 0
-      });
-    } catch (error) {
-      console.error("Ошибка при загрузке аномалий:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    fetchAnomalies(activeTab);
+    fetchStats();
+
+    const statsInterval = setInterval(fetchStats, 5000);
+    const anomalyInterval = setInterval(() => fetchAnomalies(activeTab), 10000);
+
+    return () => {
+      clearInterval(statsInterval);
+      clearInterval(anomalyInterval);
+    };
+  }, [activeTab, fetchAnomalies, fetchStats]);
 
   const handleFileUpload = async (event) => {
     const file = event.target.files[0];
@@ -120,6 +115,12 @@ export default function AdminDashboard() {
 
   const handleRowChange = (id, field, value) => {
     setAnomalies(prev => prev.map(a => a.id === id ? { ...a, [field]: value } : a));
+  };
+
+  const parseOptionalNumber = (value) => {
+    if (value === null || value === undefined || value === '') return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
   };
 
   const handleApprove = async (id, serviceId, newPrice, newPriceNonresident, rawName, serviceName = null) => {
@@ -415,7 +416,7 @@ export default function AdminDashboard() {
                         <div className="text-[#111827] font-semibold flex items-center">
                           <input 
                             type="number" 
-                            value={item.new_price_nonresident} 
+                            value={item.new_price_nonresident ?? ''} 
                             onChange={e => handleRowChange(item.id, 'new_price_nonresident', e.target.value)}
                             className="border border-[#D1D5DB] px-2 py-1 w-36 text-sm mr-2 focus:ring-[#2563EB] focus:outline-none"
                           /> ₸
@@ -458,7 +459,7 @@ export default function AdminDashboard() {
                     <div className="flex gap-2 mt-auto">
                       <button 
                         onClick={() => {
-                          handleApprove(item.id, item.suggested_service_id, parseFloat(item.new_price), parseFloat(item.new_price_nonresident), item.raw_name);
+                          handleApprove(item.id, item.suggested_service_id, parseOptionalNumber(item.new_price), parseOptionalNumber(item.new_price_nonresident), item.raw_name);
                         }}
                         disabled={loading}
                         className="bg-[#10B981] hover:bg-[#059669] text-white px-3 py-1.5 text-sm font-medium flex-1"
@@ -476,7 +477,7 @@ export default function AdminDashboard() {
                         onClick={() => {
                           const sName = prompt('Введите часть названия услуги для поиска (например "МРТ"):');
                           if (sName && sName.trim().length > 0) {
-                            handleApprove(item.id, null, parseFloat(item.new_price), parseFloat(item.new_price_nonresident), item.raw_name, sName.trim());
+                            handleApprove(item.id, null, parseOptionalNumber(item.new_price), parseOptionalNumber(item.new_price_nonresident), item.raw_name, sName.trim());
                           }
                         }}
                         className="bg-white border border-[#D1D5DB] hover:bg-[#F3F4F6] text-[#374151] px-3 py-1.5 text-sm font-medium flex-1"

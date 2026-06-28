@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import joinedload
-from typing import Optional, List
+from typing import Optional
 
 from app.db.database import get_db
 from app.models.service import Service
@@ -11,6 +11,9 @@ from app.matching.normalizer import Normalizer
 
 SERVICE_CACHE = {}
 
+def clear_service_cache() -> None:
+    SERVICE_CACHE.clear()
+
 async def get_service_cache(db: AsyncSession) -> dict:
     global SERVICE_CACHE
     if not SERVICE_CACHE:
@@ -18,14 +21,112 @@ async def get_service_cache(db: AsyncSession) -> dict:
         result = await db.execute(stmt)
         for row in result.all():
             svc_id, name, synonyms = row[0], row[1], row[2]
-            SERVICE_CACHE[f"{svc_id}_name"] = name
+            SERVICE_CACHE[f"{svc_id}_name"] = Normalizer.normalize_text(name)
+            for i, token in enumerate(Normalizer.tokens(name)):
+                if len(token) >= 4:
+                    SERVICE_CACHE[f"{svc_id}_token_{i}"] = token
             if synonyms and isinstance(synonyms, list):
                 for i, syn in enumerate(synonyms):
                     if syn:
-                        SERVICE_CACHE[f"{svc_id}_syn_{i}"] = syn
+                        SERVICE_CACHE[f"{svc_id}_syn_{i}"] = Normalizer.normalize_text(syn)
     return SERVICE_CACHE
 
 router = APIRouter()
+
+def _format_price_item(p_item: PriceItem) -> dict | None:
+    partner = p_item.partner
+    if not partner or not partner.is_active:
+        return None
+
+    return {
+        "partner_id": partner.id,
+        "partner_name": partner.name,
+        "partner_address": partner.address,
+        "partner_city": partner.city,
+        "partner_bin": partner.bin,
+        "partner_phone": partner.contact_phone,
+        "price_resident": p_item.price_resident_kzt,
+        "price_nonresident": p_item.price_nonresident_kzt,
+        "price_original": p_item.price_original,
+        "currency_original": p_item.currency_original.value if p_item.currency_original else "KZT",
+        "original_name": p_item.service_name_raw,
+        "date": p_item.effective_date.strftime("%d %b %Y") if p_item.effective_date else None,
+        "is_verified": p_item.is_verified,
+    }
+
+def _services_response(services: list[Service]) -> list[dict]:
+    response = []
+    for svc in services:
+        prices = []
+        for p_item in svc.price_items:
+            if not p_item.is_active or not p_item.is_verified:
+                continue
+            formatted = _format_price_item(p_item)
+            if formatted:
+                prices.append(formatted)
+
+        if prices:
+            response.append({
+                "service_id": svc.id,
+                "name": svc.name_ru,
+                "specialty": svc.specialty,
+                "prices": sorted(
+                    prices,
+                    key=lambda x: x["price_resident"] if x["price_resident"] is not None else float("inf"),
+                ),
+            })
+    return response
+
+async def _load_services_by_ids(db: AsyncSession, service_ids: list[int]) -> list[Service]:
+    if not service_ids:
+        return []
+
+    stmt = (
+        select(Service)
+        .join(PriceItem, PriceItem.service_id == Service.id)
+        .where(
+            Service.id.in_(service_ids),
+            PriceItem.is_active == True,
+            PriceItem.is_verified == True,
+        )
+        .options(
+            joinedload(Service.price_items).joinedload(PriceItem.document),
+            joinedload(Service.price_items).joinedload(PriceItem.partner),
+        )
+    )
+    result = await db.execute(stmt)
+    services = result.unique().scalars().all()
+    order = {svc_id: index for index, svc_id in enumerate(service_ids)}
+    return sorted(services, key=lambda svc: order.get(svc.id, len(order)))
+
+def _reliable_fuzzy_matches(query: str, matches: list[tuple]) -> list[int]:
+    from rapidfuzz import fuzz
+
+    terms = Normalizer.search_terms(query)
+    if not terms or max(len(term) for term in terms) < 4:
+        return []
+
+    matched_ids = []
+    for choice, score, key in matches:
+        if score < 82:
+            continue
+
+        choice_tokens = Normalizer.tokens(choice)
+        has_close_word = any(
+            fuzz.ratio(term, token) >= 78
+            for term in terms
+            for token in choice_tokens
+        )
+        has_term_inside = any(term in choice_tokens for term in terms)
+
+        if not has_close_word and not has_term_inside:
+            continue
+
+        service_id = int(str(key).split("_")[0])
+        if service_id not in matched_ids:
+            matched_ids.append(service_id)
+
+    return matched_ids
 
 @router.get("/categories")
 async def get_categories(db: AsyncSession = Depends(get_db)):
@@ -49,41 +150,8 @@ async def search_services(
     Поиск по эталонным услугам и возврат цен в клиниках. Возвращает полные данные партнера для модалки.
     """
     from sqlalchemy import or_, and_
-    import re
-    
-    # 1. Stop words to ignore for better matching
-    STOP_WORDS = {
-        'врач', 'врача', 'врачи', 'услуга', 'услуги', 'сдать', 'сделать', 'пройти', 
-        'клиника', 'клиники', 'центр', 'анализ', 'анализы', 'цена', 'цены', 'стоимость',
-        'руб', 'тенге', 'тг', 'kzt', 'в', 'на', 'и', 'или', 'с', 'по', 'для', 'прием'
-    }
-    
-    # Simple stemmer to strip word endings (Russian plural/case forms)
-    def stem_word(word: str) -> str:
-        word = word.lower().strip()
-        # Remove common Russian case/gender endings if word is long enough
-        suffixes = ['ого', 'его', 'ому', 'ему', 'ое', 'ая', 'ои', 'ые', 'ых', 'их', 'ам', 'ям', 'а', 'я', 'о', 'е', 'и', 'ы', 'у', 'ю', 'ом', 'ем', 'ой', 'ей', 'ь']
-        for suffix in suffixes:
-            if word.endswith(suffix) and len(word) - len(suffix) >= 4:
-                return word[:-len(suffix)]
-        return word
 
-    # Clean and tokenize query
-    clean_query = q.lower()
-    raw_words = re.findall(r'[a-zA-Zа-яА-Я0-9-+]+', clean_query)
-    
-    # Filter stop-words and stem
-    words = []
-    for w in raw_words:
-        if w not in STOP_WORDS:
-            stemmed = stem_word(w)
-            if len(stemmed) >= 2:
-                words.append(stemmed)
-                
-    # If all words were stop words, fallback to using raw words
-    if not words:
-        words = [stem_word(w) for w in raw_words if len(w) >= 2]
-        
+    words = Normalizer.search_terms(q)
     if not words:
         return []
 
@@ -93,16 +161,10 @@ async def search_services(
         conditions.append(
             or_(
                 Service.name_ru.ilike(f"%{word}%"),
-                Service.specialty.ilike(f"%{word}%"),
-                and_(
-                    PriceItem.service_name_raw.ilike(f"%{word}%"),
-                    PriceItem.is_active == True,
-                    PriceItem.is_verified == True
-                )
+                Service.specialty.ilike(f"%{word}%")
             )
         )
 
-    # Executing search query joining PriceItems (only verified and active)
     stmt = (
         select(Service)
         .join(PriceItem, PriceItem.service_id == Service.id)
@@ -121,100 +183,16 @@ async def search_services(
     
     result = await db.execute(stmt)
     services = result.unique().scalars().all()
-    
-    response = []
-    for svc in services:
-        prices = []
-        for p_item in svc.price_items:
-            if not p_item.is_active or not p_item.is_verified:
-                continue
-            
-            partner = p_item.partner
-            prices.append({
-                "partner_id": partner.id,
-                "partner_name": partner.name,
-                "partner_address": partner.address,
-                "partner_city": partner.city,
-                "partner_bin": partner.bin,
-                "partner_phone": partner.contact_phone,
-                "price_resident": p_item.price_resident_kzt,
-                "price_nonresident": p_item.price_nonresident_kzt,
-                "price_original": p_item.price_original,
-                "currency_original": p_item.currency_original.value if p_item.currency_original else "KZT",
-                "original_name": p_item.service_name_raw,
-                "date": p_item.effective_date.strftime("%d %b %Y") if p_item.effective_date else None
-            })
-            
-        if prices: # Только услуги, у которых есть хотя бы одна активная цена
-            response.append({
-                "service_id": svc.id,
-                "name": svc.name_ru,
-                "specialty": svc.specialty,
-                "prices": sorted(prices, key=lambda x: x["price_resident"] if x["price_resident"] else float('inf'))
-            })
+    response = _services_response(services)
 
     if not response:
-        # Fallback to RapidFuzz
         from rapidfuzz import process, fuzz
         
         cache = await get_service_cache(db)
-        cutoff = 60 if len(q) <= 5 else 50
-        
-        def combo_scorer(s1, s2, **kwargs):
-            return max(fuzz.WRatio(s1, s2, **kwargs), fuzz.partial_ratio(s1, s2, **kwargs))
-            
-        matches = process.extract(q, cache, limit=5, scorer=combo_scorer, score_cutoff=cutoff)
-        
-        if matches:
-            matched_ids = list({int(str(m[2]).split('_')[0]) for m in matches})
-            
-            fallback_stmt = (
-                select(Service)
-                .join(PriceItem, PriceItem.service_id == Service.id)
-                .where(
-                    and_(
-                        Service.id.in_(matched_ids),
-                        PriceItem.is_active == True,
-                        PriceItem.is_verified == True
-                    )
-                )
-                .options(
-                    joinedload(Service.price_items).joinedload(PriceItem.document),
-                    joinedload(Service.price_items).joinedload(PriceItem.partner)
-                )
-            )
-            fallback_result = await db.execute(fallback_stmt)
-            fallback_services = fallback_result.unique().scalars().all()
-            
-            for svc in fallback_services:
-                prices = []
-                for p_item in svc.price_items:
-                    if not p_item.is_active or not p_item.is_verified:
-                        continue
-                    
-                    partner = p_item.partner
-                    prices.append({
-                        "partner_id": partner.id,
-                        "partner_name": partner.name,
-                        "partner_address": partner.address,
-                        "partner_city": partner.city,
-                        "partner_bin": partner.bin,
-                        "partner_phone": partner.contact_phone,
-                        "price_resident": p_item.price_resident_kzt,
-                        "price_nonresident": p_item.price_nonresident_kzt,
-                        "price_original": p_item.price_original,
-                        "currency_original": p_item.currency_original.value if p_item.currency_original else "KZT",
-                        "original_name": p_item.service_name_raw,
-                        "date": p_item.effective_date.strftime("%d %b %Y") if p_item.effective_date else None
-                    })
-                    
-                if prices:
-                    response.append({
-                        "service_id": svc.id,
-                        "name": svc.name_ru,
-                        "specialty": svc.specialty,
-                        "prices": sorted(prices, key=lambda x: x["price_resident"] if x["price_resident"] is not None else float('inf'))
-                    })
+        normalized_query = Normalizer.normalize_text(q)
+        matches = process.extract(normalized_query, cache, limit=8, scorer=fuzz.WRatio, score_cutoff=78)
+        matched_ids = _reliable_fuzzy_matches(q, matches)
+        response = _services_response(await _load_services_by_ids(db, matched_ids))
 
     return response
 
@@ -251,6 +229,12 @@ async def get_partner_details(partner_id: int, db: AsyncSession = Depends(get_db
             "date": p.effective_date.strftime("%d %b %Y") if p.effective_date else None
         })
         
+    effective_date_val = None
+    if prices:
+        valid_dates = [p.effective_date for p in prices if p.effective_date]
+        if valid_dates:
+            effective_date_val = max(valid_dates).strftime("%d %b %Y")
+            
     return {
         "id": partner.id,
         "name": partner.name,
@@ -259,6 +243,8 @@ async def get_partner_details(partner_id: int, db: AsyncSession = Depends(get_db
         "bin": partner.bin,
         "phone": partner.contact_phone,
         "email": partner.contact_email,
+        "is_active": partner.is_active,
+        "effective_date": effective_date_val,
         "price_list": price_list
     }
 
@@ -298,7 +284,7 @@ async def get_price_history(
             for h in history:
                 if h["date"] == date_str and (item.is_active or not h["is_active"]):
                     h["price"] = float(item.price_resident_kzt) if item.price_resident_kzt is not None else 0
-                    h["price_nonresident"] = float(item.price_nonresident_kzt) if item.price_nonresident_kzt is not None else 0
+                    h["price_nonresident"] = float(item.price_nonresident_kzt) if item.price_nonresident_kzt is not None else None
                     h["is_active"] = item.is_active
             continue
             
@@ -307,7 +293,7 @@ async def get_price_history(
             "date": date_str,
             "year": item.effective_date.year,
             "price": float(item.price_resident_kzt) if item.price_resident_kzt is not None else 0,
-            "price_nonresident": float(item.price_nonresident_kzt) if item.price_nonresident_kzt is not None else 0,
+            "price_nonresident": float(item.price_nonresident_kzt) if item.price_nonresident_kzt is not None else None,
             "is_active": item.is_active
         })
         

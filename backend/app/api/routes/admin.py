@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional
 import asyncio
+import re
 
 from app.db.database import get_db
 from app.models.price_item import PriceItem
@@ -44,9 +45,11 @@ async def process_documents_task(documents_to_process: list):
             
             try:
                 from datetime import date
+                from decimal import Decimal, InvalidOperation
                 # 1. Parsing
                 parser = get_parser(file_path, {})
                 parsed_items = await asyncio.to_thread(parser.parse)
+                doc.raw_content = getattr(parser, "raw_content", "") or None
                 
                 import urllib.request
                 import xml.etree.ElementTree as ET
@@ -80,6 +83,7 @@ async def process_documents_task(documents_to_process: list):
                     doc.parse_log = (doc.parse_log or "") + f"Предупреждение: дата прайса в будущем ({doc.effective_date}).\n"
                 
                 # 2. Matching and Validation
+                from app.matching.matcher import AUTO_MATCH_THRESHOLD
                 matcher = Matcher(db_session)
                 await matcher.load_services()
                 
@@ -91,35 +95,47 @@ async def process_documents_task(documents_to_process: list):
                 prev_result = await db_session.execute(prev_stmt)
                 all_active_prices = prev_result.scalars().all()
                 
+                created_items = 0
+                review_items = 0
+                items_to_insert = []
+                seen_items = set()
+                
                 for item_data in parsed_items:
                     raw_name = str(getattr(item_data, "service_name_raw", "")).strip()
-                    if not raw_name:
-                        doc.parse_log = (doc.parse_log or "") + "Пропущена строка: пустое название услуги.\n"
+                    lower_raw = raw_name.lower()
+                    squished_raw = re.sub(r'[^a-zа-я0-9]', '', lower_raw)
+                    
+                    if not raw_name or len(squished_raw) < 4:
+                        doc.parse_log = (doc.parse_log or "") + f"Пропущена строка: слишком короткое название ({raw_name}).\n"
+                        continue
+                        
+                    garbage_exact = {"итого", "всего", "наименование", "услуга", "исследование", "операция", "манипуляция", "посещение", "процедура", "цена", "стоимость", "тенге", "код", "шифр", "в06006сыв", "сн001сыв", "b06006"}
+                    garbage_prefixes = ("приложение", "отянваря", "отфевраля", "отмарта", "отапреля", "отмая", "отиюня", "отиюля", "отавгуста", "отсентября", "отоктября", "отноября", "отдекабря")
+                    
+                    if squished_raw in garbage_exact or squished_raw.startswith(garbage_prefixes):
                         continue
                         
                     price_resident_raw = getattr(item_data, "price_resident_kzt", 0) or 0
                     price_nonresident_raw = getattr(item_data, "price_nonresident_kzt", None)
                     
                     try:
-                        from decimal import Decimal, InvalidOperation
                         price_resident = Decimal(str(price_resident_raw))
                     except (ValueError, TypeError, InvalidOperation):
                         price_resident = Decimal('0')
                         
                     try:
-                        from decimal import Decimal, InvalidOperation
                         if price_nonresident_raw is not None and str(price_nonresident_raw).strip() != "":
                             price_nonresident = Decimal(str(price_nonresident_raw))
                         else:
-                            price_nonresident = price_resident * Decimal('1.5')
+                            price_nonresident = None
                     except (ValueError, TypeError, InvalidOperation):
-                        price_nonresident = price_resident * Decimal('1.5')
+                        price_nonresident = None
                         
                     # Protect against Numeric(10,2) overflow (max 99,999,999.99)
                     max_price = Decimal('99000000')
                     if price_resident > max_price:
                         price_resident = max_price
-                    if price_nonresident > max_price:
+                    if price_nonresident is not None and price_nonresident > max_price:
                         price_nonresident = max_price
                         
                     # Currency check
@@ -127,29 +143,47 @@ async def process_documents_task(documents_to_process: list):
                     price_original = price_resident
                     if currency == "USD":
                         price_resident = price_resident * Decimal(str(usd_rate))
-                        price_nonresident = price_nonresident * Decimal(str(usd_rate))
+                        if price_nonresident is not None:
+                            price_nonresident = price_nonresident * Decimal(str(usd_rate))
                     elif currency == "RUB":
                         price_resident = price_resident * Decimal(str(rub_rate))
-                        price_nonresident = price_nonresident * Decimal(str(rub_rate))
+                        if price_nonresident is not None:
+                            price_nonresident = price_nonresident * Decimal(str(rub_rate))
+                            
+                    # Deduplication within the same document
+                    item_key = (squished_raw, price_resident)
+                    if item_key in seen_items:
+                        continue
+                    seen_items.add(item_key)
                     
-                    # AI Matching (Running CPU-bound fuzzy match in a thread pool to avoid blocking the event loop)
-                    match_result = await asyncio.to_thread(matcher.match, raw_name)
+                    match_result = matcher.match(raw_name)
                     
-                    # Если сопоставление сомнительное или отсутствует (score < 75), пробуем экспертную ИИ-подсказку через Gemini
-                    if not match_result or match_result.score < 75:
+                    # Low-confidence match → escalate to the AI fallback before giving up.
+                    if not match_result or match_result.score < AUTO_MATCH_THRESHOLD:
                         ai_match = await matcher.ai_match_fallback(raw_name)
                         if ai_match:
                             match_result = ai_match
-                            
-                    matched_service_id = match_result.service_id if match_result else None
-                    score = match_result.score if match_result else 0
+
+                    # Link to the catalog only above the auto-match threshold; otherwise the
+                    # item stays unlinked and lands in the review queue (needs_review).
+                    if match_result:
+                        score = match_result.score
+                        # Only auto-link if above threshold
+                        if score >= AUTO_MATCH_THRESHOLD:
+                            matched_service_id = match_result.service_id
+                        else:
+                            # Keep it for suggestion, but don't auto-verify
+                            matched_service_id = match_result.service_id
+                    else:
+                        matched_service_id = None
+                        score = 0
                     
                     reasons = []
 
                     # Validation rules
                     if price_resident <= 0:
                         reasons.append("Цена должна быть числом больше 0")
-                    elif price_nonresident < price_resident:
+                    elif price_nonresident is not None and price_nonresident < price_resident:
                         reasons.append("Цена для нерезидента меньше цены для резидента")
                     
                     if currency not in ["KZT", "USD", "RUB"]:
@@ -167,14 +201,16 @@ async def process_documents_task(documents_to_process: list):
                         if diff_ratio > Decimal('0.5'):
                             reasons.append(f"Цена отличается от предыдущей версии на {int(diff_ratio*100)}%")
     
-                    if score < 85:
-                        if score == 0 or matched_service_id is None:
+                    if score < AUTO_MATCH_THRESHOLD:
+                        if matched_service_id is None:
                             reasons.append("Новая услуга, нет синонимов")
                         else:
                             reasons.append(f"Уверенность сопоставления {int(score)}%")
                     
                     is_verified = len(reasons) == 0
                     verification_note = "; ".join(reasons) if not is_verified else None
+                    if not is_verified:
+                        review_items += 1
 
                     # Deactivate old version if the new one is auto-verified immediately
                     if is_verified and prev_item:
@@ -195,10 +231,20 @@ async def process_documents_task(documents_to_process: list):
                         is_active=True,
                         match_score=score
                     )
-                    db_session.add(new_item)
+                    items_to_insert.append(new_item)
+                    created_items += 1
+                
+                if items_to_insert:
+                    db_session.add_all(items_to_insert)
                 
                 try:
-                    doc.parse_status = ParseStatus.done
+                    if created_items == 0:
+                        doc.parse_status = ParseStatus.error
+                        doc.parse_log = (doc.parse_log or "") + "Документ не содержит распознаваемых строк с ценами.\n"
+                    elif review_items > 0 or (doc.parse_log and "Предупреждение" in doc.parse_log):
+                        doc.parse_status = ParseStatus.needs_review
+                    else:
+                        doc.parse_status = ParseStatus.done
                     await db_session.commit()
                 except Exception as e:
                     await db_session.rollback()
@@ -252,7 +298,9 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
     from app.models.partner import Partner
     
     # 1. Количество обработанных документов
-    docs_stmt = select(func.count()).select_from(PriceDocument).where(PriceDocument.parse_status == ParseStatus.done)
+    docs_stmt = select(func.count()).select_from(PriceDocument).where(
+        PriceDocument.parse_status.in_([ParseStatus.done, ParseStatus.needs_review])
+    )
     docs_result = await db.execute(docs_stmt)
     processed_docs = docs_result.scalar() or 0
     
@@ -261,19 +309,18 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
     clinics_result = await db.execute(clinics_stmt)
     active_clinics = clinics_result.scalar() or 0
     
-    # 3. Позиции в очереди
-    # 4. Процент автоматической нормализации
+    # automationScore = доля активных позиций, привязанных к справочнику (service_id IS NOT NULL).
+    # Это честная мера «нормализации» по ТЗ (п.4.3), без хардкода.
     total_active_stmt = select(func.count()).select_from(PriceItem).where(PriceItem.is_active == True)
     total_active = (await db.execute(total_active_stmt)).scalar() or 0
-    
-    verified_active_stmt = select(func.count()).select_from(PriceItem).where(
+
+    normalized_stmt = select(func.count()).select_from(PriceItem).where(
         PriceItem.is_active == True,
-        PriceItem.is_verified == True
+        PriceItem.service_id.is_not(None)
     )
-    verified_active = (await db.execute(verified_active_stmt)).scalar() or 0
-    
-    real_score = int((verified_active / total_active) * 100) if total_active > 0 else 100
-    automation_score = real_score
+    normalized_active = (await db.execute(normalized_stmt)).scalar() or 0
+
+    automation_score = int((normalized_active / total_active) * 100) if total_active > 0 else 0
     
     # Adjust in_queue to match the actual DB count to prevent bouncing issues
     unmatched_stmt = select(func.count()).select_from(PriceItem).where(
@@ -282,14 +329,18 @@ async def get_dashboard_stats(db: AsyncSession = Depends(get_db)):
     )
     in_queue = (await db.execute(unmatched_stmt)).scalar() or 0
     
-    # 5. Количество документов в обработке
-    processing_stmt = select(func.count()).select_from(PriceDocument).where(PriceDocument.parse_status == ParseStatus.processing)
+    # 5. Количество документов в обработке (и в очереди)
+    processing_stmt = select(func.count()).select_from(PriceDocument).where(
+        PriceDocument.parse_status.in_([ParseStatus.processing, ParseStatus.pending])
+    )
     processing_result = await db.execute(processing_stmt)
     processing_count = processing_result.scalar() or 0
     
     return {
         "processed": processed_docs,
         "automationScore": automation_score,
+        "normalizedItems": normalized_active,
+        "totalItems": total_active,
         "inQueue": in_queue,
         "activeClinics": active_clinics,
         "processingCount": processing_count
@@ -314,7 +365,7 @@ async def get_unmatched_items(
     # 1. Считаем общее число для обеих очередей для вкладок
     fast_track_count_stmt = select(func.count()).select_from(PriceItem).where(
         base_cond,
-        PriceItem.match_score >= 70,
+        PriceItem.match_score >= 60,
         PriceItem.match_score < 85,
         or_(
             PriceItem.verification_note == None,
@@ -322,7 +373,7 @@ async def get_unmatched_items(
                 not_(PriceItem.verification_note.ilike("%цена%")),
                 not_(PriceItem.verification_note.ilike("%валют%")),
                 not_(PriceItem.verification_note.ilike("%нерезидент%")),
-                not_(PriceItem.verification_note.ilike("%синонимов%"))
+                
             )
         )
     )
@@ -331,12 +382,11 @@ async def get_unmatched_items(
     anomaly_count_stmt = select(func.count()).select_from(PriceItem).where(
         base_cond,
         or_(
-            PriceItem.match_score < 70,
+            PriceItem.match_score < 60,
             PriceItem.match_score.is_(None),
             PriceItem.verification_note.ilike("%цена%"),
             PriceItem.verification_note.ilike("%валют%"),
-            PriceItem.verification_note.ilike("%нерезидент%"),
-            PriceItem.verification_note.ilike("%синонимов%")
+            PriceItem.verification_note.ilike("%нерезидент%")
         )
     )
     anomaly_count = (await db.execute(anomaly_count_stmt)).scalar() or 0
@@ -345,15 +395,14 @@ async def get_unmatched_items(
     if queue == "fast_track":
         stmt = select(PriceItem).where(
             base_cond,
-            PriceItem.match_score >= 70,
+            PriceItem.match_score >= 60,
             PriceItem.match_score < 85,
             or_(
                 PriceItem.verification_note == None,
                 and_(
                     not_(PriceItem.verification_note.ilike("%цена%")),
                     not_(PriceItem.verification_note.ilike("%валют%")),
-                    not_(PriceItem.verification_note.ilike("%нерезидент%")),
-                    not_(PriceItem.verification_note.ilike("%синонимов%"))
+                    not_(PriceItem.verification_note.ilike("%нерезидент%"))
                 )
             )
         ).options(
@@ -365,12 +414,11 @@ async def get_unmatched_items(
         stmt = select(PriceItem).where(
             base_cond,
             or_(
-                PriceItem.match_score < 70,
+                PriceItem.match_score < 60,
                 PriceItem.match_score.is_(None),
                 PriceItem.verification_note.ilike("%цена%"),
                 PriceItem.verification_note.ilike("%валют%"),
-                PriceItem.verification_note.ilike("%нерезидент%"),
-                PriceItem.verification_note.ilike("%синонимов%")
+                PriceItem.verification_note.ilike("%нерезидент%")
             )
         ).options(
             joinedload(PriceItem.partner),
@@ -395,7 +443,7 @@ async def get_unmatched_items(
         
         old_price = float(prev_item.price_resident_kzt) if prev_item else None
         new_price = float(item.price_resident_kzt) if item.price_resident_kzt is not None else 0.0
-        new_price_nonresident = float(item.price_nonresident_kzt) if item.price_nonresident_kzt is not None else 0.0
+        new_price_nonresident = float(item.price_nonresident_kzt) if item.price_nonresident_kzt is not None else None
         diff_str = ""
         if old_price:
             diff = new_price - old_price
@@ -411,11 +459,11 @@ async def get_unmatched_items(
                 other_anomalies = True
 
         is_fast_track = False
-        if item.match_score is not None and 70 <= item.match_score < 85 and not other_anomalies:
+        if item.match_score is not None and 50 <= item.match_score < 65 and not other_anomalies:
             is_fast_track = True
 
         # Status logic matching thresholds
-        if other_anomalies or (item.match_score is not None and item.match_score < 70) or "синонимов" in (item.verification_note or "").lower():
+        if other_anomalies or (item.match_score is not None and item.match_score < 50):
             status = "anomaly"
         elif is_fast_track:
             status = "fast_track"
@@ -493,12 +541,22 @@ async def match_item(
     """
     Ручное подтверждение (или корректировка) оператором.
     """
+    from decimal import Decimal
+
     stmt = select(PriceItem).where(PriceItem.id == item_id)
     result = await db.execute(stmt)
     item = result.scalars().first()
-    
+
     if not item:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
+
+    resident_price = Decimal(str(price)) if price is not None else item.price_resident_kzt
+    nonresident_price = Decimal(str(price_nonresident)) if price_nonresident is not None else item.price_nonresident_kzt
+
+    if resident_price is None or resident_price <= 0:
+        raise HTTPException(status_code=400, detail="Цена должна быть числом больше 0")
+    if nonresident_price is not None and nonresident_price < resident_price:
+        raise HTTPException(status_code=400, detail="Цена для нерезидента не может быть меньше цены для резидента")
         
     
     if service_name and not service_id:
@@ -537,6 +595,8 @@ async def match_item(
             if raw_name not in current_synonyms:
                 new_synonyms = list(current_synonyms) + [raw_name]
                 svc.synonyms = new_synonyms
+                from app.api.routes.search import clear_service_cache
+                clear_service_cache()
 
     # Создание новой бессрочной версии с внесенными правками
     new_item = PriceItem(
@@ -545,9 +605,9 @@ async def match_item(
         service_name_raw=raw_name,
         service_code_source=item.service_code_source,
         service_id=service_id,
-        price_resident_kzt=price,
-        price_nonresident_kzt=price_nonresident,
-        price_original=price, # Update original to match new resident price
+        price_resident_kzt=resident_price,
+        price_nonresident_kzt=nonresident_price,
+        price_original=resident_price,
         currency_original=item.currency_original,
         is_verified=True,
         verification_note="Проверено и скорректировано оператором",
@@ -603,7 +663,7 @@ async def get_auto_normalized_items(db: AsyncSession = Depends(get_db)):
             "service_name": item.service.name_ru if item.service else None,
             "confidence": item.match_score,
             "price_resident": float(item.price_resident_kzt) if item.price_resident_kzt is not None else 0.0,
-            "price_nonresident": float(item.price_nonresident_kzt) if item.price_nonresident_kzt is not None else 0.0,
+            "price_nonresident": float(item.price_nonresident_kzt) if item.price_nonresident_kzt is not None else None,
             "partner_name": item.partner.name if item.partner else None,
             "effective_date": item.effective_date.strftime("%Y-%m-%d") if item.effective_date else None
         })
@@ -653,7 +713,7 @@ async def export_price_data(db: AsyncSession = Depends(get_db)):
                 row.service_name_raw,
                 mapped_service,
                 str(row.price_resident_kzt or 0),
-                str(row.price_nonresident_kzt or 0),
+                str(row.price_nonresident_kzt) if row.price_nonresident_kzt is not None else "",
                 str(row.price_original or ""),
                 row.currency_original.value if row.currency_original else "",
                 status_text,

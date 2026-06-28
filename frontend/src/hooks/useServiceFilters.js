@@ -30,19 +30,6 @@ export function useServiceFilters(initialResults = [], selectedCity = 'Аста�
 
   const debouncedQuery = useDebounce(query, 300);
 
-  // Fetch categories once on mount
-  useEffect(() => {
-    const fetchCategories = async () => {
-      try {
-        const response = await axios.get(`${API_BASE_URL}/api/v1/categories`);
-        setCategories(['Все', ...response.data]);
-      } catch (error) {
-        console.error("Error fetching categories:", error);
-      }
-    };
-    fetchCategories();
-  }, []);
-
   // Fetch results when debounced query changes
   useEffect(() => {
     const fetchResults = async () => {
@@ -69,40 +56,50 @@ export function useServiceFilters(initialResults = [], selectedCity = 'Аста�
     fetchResults();
   }, [debouncedQuery]);
 
-  // Combined client-side filtering via useMemo (logical AND)
-  const filteredResults = useMemo(() => {
-    return results
-      .map(service => {
-        // Filter prices within each service by the selected city
-        const filteredPrices = service.prices.filter(price => {
-          // Filter by selected city
-          const matchesCity = !selectedCity || price.partner_city === selectedCity;
-          if (!matchesCity) return false;
-
-          return true;
-        });
-
-        // Dynamic sorting based on resident status
-        const sortedPrices = [...filteredPrices].sort((a, b) => {
-          const valA = isResident ? (a.price_resident ?? Infinity) : (a.price_nonresident ?? Infinity);
-          const valB = isResident ? (b.price_resident ?? Infinity) : (b.price_nonresident ?? Infinity);
-          return valA - valB;
-        });
-
-        return {
-          ...service,
-          prices: sortedPrices
-        };
-      })
-      // Keep only services that have prices available in the selected city
-      .filter(service => service.prices.length > 0)
-      // Filter by category tab
-      .filter(service => {
-        if (activeCategory === 'Все') return true;
-        // Direct match with DB specialty since we fetched them natively
-        return (service.specialty || 'Консультации') === activeCategory;
+  // First pass: filter by city and build dynamic categories
+  const { cityFilteredResults, dynamicCategories } = useMemo(() => {
+    const specs = new Set();
+    
+    const cityFiltered = results.map(service => {
+      const filteredPrices = service.prices.filter(price => {
+        const matchesCity = !selectedCity || price.partner_city === selectedCity;
+        return matchesCity;
       });
-  }, [results, activeCategory, selectedCity, isResident]);
+      
+      const sortedPrices = [...filteredPrices].sort((a, b) => {
+        const valA = isResident ? (a.price_resident ?? Infinity) : (a.price_nonresident ?? Infinity);
+        const valB = isResident ? (b.price_resident ?? Infinity) : (b.price_nonresident ?? Infinity);
+        return valA - valB;
+      });
+
+      if (sortedPrices.length > 0) {
+        specs.add(service.specialty || 'Общая');
+      }
+
+      return {
+        ...service,
+        prices: sortedPrices
+      };
+    }).filter(service => service.prices.length > 0);
+    
+    return {
+      cityFilteredResults: cityFiltered,
+      dynamicCategories: ['Все', ...Array.from(specs).sort()]
+    };
+  }, [results, selectedCity, isResident]);
+
+  // Second pass: filter by active category
+  const filteredResults = useMemo(() => {
+    // If the active category is no longer valid, reset to 'Все' (handled in component usually, but safe here)
+    if (activeCategory !== 'Все' && !dynamicCategories.includes(activeCategory)) {
+      setActiveCategory('Все');
+    }
+    
+    return cityFilteredResults.filter(service => {
+      if (activeCategory === 'Все') return true;
+      return (service.specialty || 'Общая') === activeCategory;
+    });
+  }, [cityFilteredResults, activeCategory, dynamicCategories]);
 
   return {
     query,
@@ -114,6 +111,6 @@ export function useServiceFilters(initialResults = [], selectedCity = 'Аста�
     loading,
     searched,
     filteredResults,
-    categories
+    categories: dynamicCategories
   };
 }

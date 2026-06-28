@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Search, Loader2, TrendingUp, X, MapPin, Building2, Phone } from 'lucide-react';
+import { Search, Loader2, TrendingUp, X, MapPin, Building2, Phone, ShieldCheck } from 'lucide-react';
 import { useServiceFilters } from '../hooks/useServiceFilters';
 import { API_BASE_URL } from '../config';
 
@@ -19,7 +19,6 @@ export default function ClientHome({ selectedCity }) {
   } = useServiceFilters([], selectedCity);
   
   const [selectedPartner, setSelectedPartner] = useState(null);
-  const [partnerModalLoading, setPartnerModalLoading] = useState(false);
 
   // States for Price History / Dynamics
   const [expandedHistory, setExpandedHistory] = useState(null);
@@ -42,6 +41,11 @@ export default function ClientHome({ selectedCity }) {
   const chatContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const isUserScrolledUp = useRef(false);
+
+  const formatPrice = (value) => {
+    if (value === null || value === undefined || value === '') return 'Не указано';
+    return `${Number(value).toLocaleString('ru-RU')} ₸`;
+  };
 
   useEffect(() => {
     if (!isUserScrolledUp.current && messagesEndRef.current) {
@@ -156,7 +160,7 @@ export default function ClientHome({ selectedCity }) {
       return (
         <div className="flex gap-4 items-center text-xs text-[#4B5563] p-3 bg-[#F9FAFB] border border-[#E5E7EB] mt-2">
           <span>Период действия цены ({data[0].date}):</span>
-          <span className="font-semibold text-[#111827]">{p.toLocaleString('ru-RU')} ₸</span>
+          <span className="font-semibold text-[#111827]">{formatPrice(p)}</span>
           <span className="text-[#9CA3AF]">(Только одна точка цены в базе)</span>
         </div>
       );
@@ -166,16 +170,27 @@ export default function ClientHome({ selectedCity }) {
     const height = 80;
     const padding = 15;
     
-    const prices = data.map(d => isResident ? d.price : d.price_nonresident);
+    const chartRows = data.filter(d => {
+      const value = isResident ? d.price : d.price_nonresident;
+      return value !== null && value !== undefined;
+    });
+    const prices = chartRows.map(d => isResident ? d.price : d.price_nonresident);
+    if (prices.length === 0) {
+      return (
+        <div className="text-xs text-[#6B7280] p-3 bg-[#F9FAFB] border border-[#E5E7EB] mt-2">
+          Для выбранного тарифа отдельная цена не указана.
+        </div>
+      );
+    }
     const minPrice = Math.min(...prices);
     const maxPrice = Math.max(...prices);
     const priceRange = maxPrice - minPrice || 1;
     
-    const points = data.map((d, index) => {
-      const x = padding + (index / (data.length - 1)) * (width - 2 * padding);
+    const points = chartRows.map((d, index) => {
+      const x = padding + (index / (chartRows.length - 1 || 1)) * (width - 2 * padding);
       const currentPrice = isResident ? d.price : d.price_nonresident;
       const y = height - padding - ((currentPrice - minPrice) / priceRange) * (height - 2 * padding);
-      return { x, y, label: `${currentPrice.toLocaleString('ru-RU')} ₸`, date: d.date.substring(5) };
+      return { x, y, label: formatPrice(currentPrice), date: d.date.substring(5) };
     });
     
     const polylinePoints = points.map(p => `${p.x},${p.y}`).join(' ');
@@ -221,12 +236,12 @@ export default function ClientHome({ selectedCity }) {
           </div>
           
           <div className="flex-1 flex flex-col gap-1 max-h-[70px] overflow-y-auto pr-1">
-            {data.map((d, idx) => {
+            {chartRows.map((d, idx) => {
               const p = isResident ? d.price : d.price_nonresident;
               return (
                 <div key={idx} className="flex justify-between items-center text-[10px] text-[#4B5563]">
                   <span>{d.date}</span>
-                  <span className="font-semibold text-[#111827]">{p.toLocaleString('ru-RU')} ₸</span>
+                  <span className="font-semibold text-[#111827]">{formatPrice(p)}</span>
                 </div>
               );
             })}
@@ -239,14 +254,11 @@ export default function ClientHome({ selectedCity }) {
 
 
   const openPartnerModal = async (partnerId) => {
-    setPartnerModalLoading(true);
     try {
       const response = await axios.get(`${API_BASE_URL}/api/v1/partner/${partnerId}`);
       setSelectedPartner(response.data);
     } catch (error) {
       console.error("Ошибка загрузки профиля клиники:", error);
-    } finally {
-      setPartnerModalLoading(false);
     }
   };
 
@@ -330,21 +342,23 @@ export default function ClientHome({ selectedCity }) {
 
       {searched && (
         <>
-          <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
-            {categories.map(tab => (
-              <button
-                key={tab}
-                onClick={() => setActiveCategory(tab)}
-                className={`px-3 py-1 text-xs font-medium whitespace-nowrap ${
- activeCategory === tab 
- ? 'bg-[#111827] text-white' 
- : 'bg-white border border-[#D1D5DB] text-[#4B5563] hover:border-[#9CA3AF]'
- }`}
-              >
-                {tab}
-              </button>
-            ))}
-          </div>
+          {categories.length > 2 && (
+            <div className="flex gap-2 mb-6 overflow-x-auto pb-2">
+              {categories.map(tab => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveCategory(tab)}
+                  className={`px-3 py-1 text-xs font-medium whitespace-nowrap ${
+   activeCategory === tab 
+   ? 'bg-[#111827] text-white' 
+   : 'bg-white border border-[#D1D5DB] text-[#4B5563] hover:border-[#9CA3AF]'
+   }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+          )}
 
           <div className="space-y-4">
             {loading ? (
@@ -375,14 +389,32 @@ export default function ClientHome({ selectedCity }) {
                     </span>
                   </div>
                   <div className="divide-y divide-[#F3F4F6]">
-                    {item.prices.map((priceItem, pIndex) => {
-                      const displayPrice = isResident ? priceItem.price_resident : priceItem.price_nonresident;
-                      const hasForeignCurrency = priceItem.currency_original && priceItem.currency_original !== 'KZT';
+                    {[...item.prices].sort((a, b) => {
+                      const consRegex = /пробирк|игла|шприц|бабочк|контейнер|вакутайнер|система для|микротейнер|жгут|пластырь|перчатк|пеленк|бахил|шпател|зеркало|презерватив|гель|бинт|вата|салфетк|пинцет|маска|катетер|ланцет|скарификатор|скальпел|зонд|набор|расходн|материал/i;
+                      const isConsA = consRegex.test(a.original_name);
+                      const isConsB = consRegex.test(b.original_name);
+                      if (isConsA && !isConsB) return 1;
+                      if (!isConsA && isConsB) return -1;
+                      return 0;
+                    }).map((priceItem, pIndex) => {
+                      const consRegex = /пробирк|игла|шприц|бабочк|контейнер|вакутайнер|система для|микротейнер|жгут|пластырь|перчатк|пеленк|бахил|шпател|зеркало|презерватив|гель|бинт|вата|салфетк|пинцет|маска|катетер|ланцет|скарификатор|скальпел|зонд|набор|расходн|материал/i;
+                      const isConsumable = consRegex.test(priceItem.original_name);
+                      
+                      let displayPrice = priceItem.price_resident;
+                      let isFallback = false;
+                      if (!isResident) {
+                        if (priceItem.price_nonresident !== null && priceItem.price_nonresident !== undefined && priceItem.price_nonresident !== "") {
+                          displayPrice = priceItem.price_nonresident;
+                        } else {
+                          isFallback = true;
+                        }
+                      }
+                      
                       const isExpanded = expandedHistory === `${item.service_id}_${priceItem.partner_id}_${priceItem.original_name}`;
                       
                       return (
                         <div key={pIndex} className="flex flex-col">
-                          <div className="p-5 flex justify-between items-center hover:bg-[#F9FAFB]">
+                          <div className={`p-5 flex justify-between items-center hover:bg-[#F9FAFB] ${isConsumable ? 'bg-[#FDFDFD] opacity-80' : ''}`}>
                             <div className="flex flex-col gap-1 w-2/3">
                               <button 
                                 onClick={() => openPartnerModal(priceItem.partner_id)}
@@ -392,9 +424,21 @@ export default function ClientHome({ selectedCity }) {
                                 {priceItem.partner_name}
                               </button>
                               <span className="text-xs text-[#6B7280]">По прайсу: {priceItem.original_name}</span>
-                              <span className="text-[11px] font-medium text-[#059669] bg-[#ECFDF5] w-fit px-2 py-0.5 mt-1">
-                                Актуально: {priceItem.date}
-                              </span>
+                              <div className="flex gap-2 items-center mt-1">
+                                <span className="text-[11px] font-medium text-[#059669] bg-[#ECFDF5] w-fit px-2 py-0.5">
+                                  Актуально: {priceItem.date}
+                                </span>
+                                {priceItem.is_verified && (
+                                  <span className="text-[#059669]" title="Верифицировано">
+                                    <ShieldCheck size={14} />
+                                  </span>
+                                )}
+                                {isConsumable && (
+                                  <span className="text-[11px] font-medium text-[#6B7280] bg-[#F3F4F6] w-fit px-2 py-0.5 rounded border border-[#E5E7EB]">
+                                    Расходный материал
+                                  </span>
+                                )}
+                              </div>
                             </div>
                             <div className="flex items-center gap-4">
                               <button 
@@ -411,10 +455,15 @@ export default function ClientHome({ selectedCity }) {
                               </button>
                               <div className="flex flex-col items-end min-w-[90px]">
                                 <div className="text-base font-bold text-[#111827]">
-                                  {displayPrice ? `${Number(displayPrice).toLocaleString('ru-RU')} ₸` : 'По запросу'}
+                                  {formatPrice(displayPrice)}
                                 </div>
+                                {isFallback && !isResident && (
+                                  <div className="text-[10px] text-[#6B7280] bg-[#F3F4F6] px-1.5 py-0.5 mt-0.5 rounded">
+                                    Единая цена
+                                  </div>
+                                )}
                                 {priceItem.price_original !== undefined && priceItem.price_original !== null && (
-                                  <div className="text-[10px] text-[#9CA3AF]">
+                                  <div className="text-[10px] text-[#9CA3AF] mt-0.5">
                                     Исходная: {Number(priceItem.price_original).toLocaleString('ru-RU')} {priceItem.currency_original || 'KZT'}
                                   </div>
                                 )}
@@ -442,7 +491,20 @@ export default function ClientHome({ selectedCity }) {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden">
             <div className="flex justify-between items-center p-5 border-b border-[#E5E7EB]">
-              <h2 className="text-lg font-bold text-[#111827]">{selectedPartner.name}</h2>
+              <div className="flex items-center gap-3">
+                <h2 className="text-lg font-bold text-[#111827]">{selectedPartner.name}</h2>
+                {selectedPartner.is_active && (
+                  <div className="flex items-center gap-1.5 bg-[#ECFDF5] border border-[#A7F3D0] px-2 py-0.5 rounded-full" title="Актуальный прайс">
+                    <span className="relative flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                    </span>
+                    <span className="text-[11px] text-[#059669] font-medium tracking-tight">
+                      Актуально {selectedPartner.effective_date ? `до ${selectedPartner.effective_date}` : ''}
+                    </span>
+                  </div>
+                )}
+              </div>
               <button onClick={() => setSelectedPartner(null)} className="text-[#9CA3AF] hover:text-[#111827]">
                 <X size={20} />
               </button>
@@ -490,8 +552,8 @@ export default function ClientHome({ selectedCity }) {
                       <tr key={i} className="hover:bg-[#F9FAFB]">
                         <td className="px-4 py-2 font-medium text-[#111827]">{p.service_name}</td>
                         <td className="px-4 py-2 text-[#6B7280]">{p.specialty}</td>
-                        <td className="px-4 py-2 text-[#111827]">{p.price_resident} ₸</td>
-                        <td className="px-4 py-2 text-[#6B7280]">{p.price_nonresident} ₸</td>
+                        <td className="px-4 py-2 text-[#111827]">{formatPrice(p.price_resident)}</td>
+                        <td className="px-4 py-2 text-[#6B7280]">{formatPrice(p.price_nonresident)}</td>
                         <td className="px-4 py-2 text-[#9CA3AF] text-xs">
                           {p.price_original !== undefined && p.price_original !== null ? `${Number(p.price_original).toLocaleString('ru-RU')} ${p.currency_original || 'KZT'}` : '-'}
                         </td>
@@ -577,7 +639,7 @@ export default function ClientHome({ selectedCity }) {
                                 >
                                   {pr.partner_name}
                                 </button>
-                                <span className="font-bold text-[#111827]">{price ? `${Number(price).toLocaleString('ru-RU')} ₸` : 'По запросу'}</span>
+                                <span className="font-bold text-[#111827]">{formatPrice(price)}</span>
                               </div>
                             );
                           })}

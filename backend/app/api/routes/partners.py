@@ -70,7 +70,7 @@ async def get_partner_services(partner_id: int, db: AsyncSession = Depends(get_d
             "service_name": p.service.name_ru if p.service else p.service_name_raw,
             "specialty": p.service.specialty if p.service else "Общее",
             "price_resident": float(p.price_resident_kzt) if p.price_resident_kzt else 0,
-            "price_nonresident": float(p.price_nonresident_kzt) if p.price_nonresident_kzt else 0,
+            "price_nonresident": float(p.price_nonresident_kzt) if p.price_nonresident_kzt is not None else None,
             "price_original": float(p.price_original) if p.price_original else 0,
             "currency_original": p.currency_original.value if p.currency_original else "KZT",
             "date": p.effective_date.strftime("%d %b %Y") if p.effective_date else None
@@ -91,6 +91,7 @@ async def get_partner_services(partner_id: int, db: AsyncSession = Depends(get_d
             "address": partner.address,
             "bin": partner.bin,
             "is_verified": partner.is_verified,
+            "is_active": partner.is_active,
             "verification_date": partner.verification_date.strftime("%Y-%m-%d %H:%M:%S") if partner.verification_date else None,
             "effective_date": effective_date_val
         },
