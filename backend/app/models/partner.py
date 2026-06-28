@@ -5,7 +5,7 @@ from app.models.base import Base
 class Partner(Base):
     __tablename__ = "partners"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column("partner_id", Integer, primary_key=True, index=True)
     name = Column(String, index=True, nullable=False)
     city = Column(String, index=True, nullable=True)
     address = Column(String, nullable=True)

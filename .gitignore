@@ -45,3 +45,16 @@ dist-ssr/
 *.njsproj
 *.sln
 *.sw?
+
+# Test / scratch archives — do not ship large binary test data
+dummy_archive/
+*.zip
+!backend/data/Справочник\ услуг.xlsx
+
+# Garbage files from manual one-off fixes
+*_test*.py
+fix_*.py
+clean_*.py
+run_all_fixes.py
+automated_test*
+

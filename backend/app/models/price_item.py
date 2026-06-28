@@ -11,13 +11,13 @@ class CurrencyEnum(str, enum.Enum):
 class PriceItem(Base):
     __tablename__ = "price_items"
 
-    id = Column(Integer, primary_key=True, index=True)
-    document_id = Column(Integer, ForeignKey("price_documents.id", ondelete="CASCADE"), nullable=False)
-    partner_id = Column(Integer, ForeignKey("partners.id", ondelete="CASCADE"), nullable=False)
+    id = Column("item_id", Integer, primary_key=True, index=True)
+    document_id = Column("doc_id", Integer, ForeignKey("price_documents.doc_id", ondelete="CASCADE"), nullable=False)
+    partner_id = Column(Integer, ForeignKey("partners.partner_id", ondelete="CASCADE"), nullable=False)
     
     service_name_raw = Column(String, nullable=False)
     service_code_source = Column(String, nullable=True)
-    service_id = Column(Integer, ForeignKey("services.id", ondelete="SET NULL"), nullable=True)
+    service_id = Column(Integer, ForeignKey("services.service_id", ondelete="SET NULL"), nullable=True)
     
     price_resident_kzt = Column(Numeric(10, 2), nullable=True)
     price_nonresident_kzt = Column(Numeric(10, 2), nullable=True)

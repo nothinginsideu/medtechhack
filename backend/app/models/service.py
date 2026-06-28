@@ -8,13 +8,13 @@ class Service(Base):
     """
     __tablename__ = "services"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column("service_id", Integer, primary_key=True, index=True)
     specialty = Column(String, index=True, nullable=True)
     code = Column(String, index=True, nullable=True)
     category = Column(String, index=True, nullable=True)
     icd_code = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
-    name_ru = Column(String, index=True, nullable=False)
+    name_ru = Column("service_name", String, index=True, nullable=False)
     tarificator_code = Column(String, nullable=True)
     synonyms = Column(JSON, nullable=True)
 

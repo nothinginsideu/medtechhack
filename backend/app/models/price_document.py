@@ -20,8 +20,8 @@ class FileFormat(str, enum.Enum):
 class PriceDocument(Base):
     __tablename__ = "price_documents"
 
-    id = Column(Integer, primary_key=True, index=True)
-    partner_id = Column(Integer, ForeignKey("partners.id", ondelete="CASCADE"), nullable=False)
+    id = Column("doc_id", Integer, primary_key=True, index=True)
+    partner_id = Column(Integer, ForeignKey("partners.partner_id", ondelete="CASCADE"), nullable=False)
     file_name = Column(String, nullable=False)
     file_format = Column(Enum(FileFormat), nullable=False)
     effective_date = Column(Date, nullable=True)
